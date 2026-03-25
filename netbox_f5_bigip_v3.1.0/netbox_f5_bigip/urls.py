@@ -24,4 +24,9 @@ urlpatterns = [
     path('job/<str:job_id>/status/',
          views.JobStatusView.as_view(),
          name='job_status'),
+
+    # Purge de tous les objets F5 d'un device
+    path('<str:kind>/<int:device_id>/purge/',
+         views.PurgeView.as_view(),
+         name='purge'),
 ]

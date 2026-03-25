@@ -146,6 +146,7 @@
                 {% endif %}
             </td>
             <td class="text-end pe-3">
+                <div class="d-flex gap-2 justify-content-end">
                 {% if d.has_ip %}
                 <a href="{% url 'plugins:netbox_f5_bigip:connect' kind=d.kind device_id=d.id %}"
                    class="btn btn-sm f5-btn-connect">
@@ -156,6 +157,14 @@
                     <i class="mdi mdi-lan-disconnect"></i> Se connecter
                 </button>
                 {% endif %}
+                {% if d.last_sync %}
+                <button class="btn btn-sm btn-outline-danger"
+                        onclick="openPurgeModal('{{ d.kind }}', {{ d.id }}, '{{ d.name }}')"
+                        title="Purger tous les objets F5 de cet équipement">
+                    <i class="mdi mdi-delete-sweep"></i>
+                </button>
+                {% endif %}
+                </div>
             </td>
         </tr>
         {% endfor %}
@@ -174,4 +183,103 @@
     Vérifiez que vos F5 (physiques ou VM) ont bien un rôle dont le nom contient <code>balancer</code>.
 </div>
 {% endif %}
+
+<!-- Modale de confirmation de purge -->
+<div class="modal fade" id="purgeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title"><i class="mdi mdi-delete-sweep"></i> Purge F5 — <span id="purgeDeviceName"></span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning py-2">
+                    <i class="mdi mdi-alert"></i>
+                    <strong>Action irréversible.</strong> Les objets supprimés ne pourront pas être récupérés.
+                </div>
+                <p class="mb-2">Seront supprimés pour <strong id="purgeDeviceName2"></strong> :</p>
+                <ul class="mb-3">
+                    <li>Tous les <strong>Services</strong> (Virtual Servers importés)</li>
+                    <li>Toutes les <strong>IPAddresses</strong> marquées <code>[F5 *]</code></li>
+                </ul>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="purgeVlansCheck">
+                    <label class="form-check-label" for="purgeVlansCheck">
+                        Supprimer aussi les <strong>VLANs F5</strong> (groupe DC/Tenant) et le VLANGroup associé
+                        <br><small class="text-muted">⚠ Attention si des VLANs sont utilisés par d'autres équipements</small>
+                    </label>
+                </div>
+                <div id="purgeResult" class="mt-3" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-danger" id="purgeConfirmBtn" onclick="executePurge()">
+                    <i class="mdi mdi-delete-sweep"></i> Confirmer la purge
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% csrf_token %}
+<script>
+let _purgeKind = '', _purgeDeviceId = 0;
+
+function openPurgeModal(kind, deviceId, deviceName) {
+    _purgeKind     = kind;
+    _purgeDeviceId = deviceId;
+    document.getElementById('purgeDeviceName').textContent  = deviceName;
+    document.getElementById('purgeDeviceName2').textContent = deviceName;
+    document.getElementById('purgeVlansCheck').checked = false;
+    document.getElementById('purgeResult').style.display = 'none';
+    document.getElementById('purgeConfirmBtn').disabled = false;
+    document.getElementById('purgeConfirmBtn').innerHTML = '<i class="mdi mdi-delete-sweep"></i> Confirmer la purge';
+    new bootstrap.Modal(document.getElementById('purgeModal')).show();
+}
+
+function executePurge() {
+    const btn    = document.getElementById('purgeConfirmBtn');
+    const result = document.getElementById('purgeResult');
+    const purgeVlans = document.getElementById('purgeVlansCheck').checked ? '1' : '0';
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Purge en cours…';
+
+    const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    const url  = `/plugins/f5bigip/${_purgeKind}/${_purgeDeviceId}/purge/`;
+    const body = new URLSearchParams({csrfmiddlewaretoken: csrf, purge_vlans: purgeVlans});
+
+    fetch(url, {method: 'POST', body})
+    .then(r => r.json())
+    .then(data => {
+        result.style.display = 'block';
+        if (data.success) {
+            const d = data.deleted;
+            const vlanInfo = d.vlans > 0
+                ? ` · <strong>${d.vlans}</strong> VLAN(s)${d.vlan_group ? ' + groupe' : ''}`
+                : '';
+            result.innerHTML = `
+                <div class="alert alert-success py-2 mb-0">
+                    <i class="mdi mdi-check-circle"></i>
+                    Purge <strong>${data.device}</strong> terminée :<br>
+                    <strong>${d.services}</strong> service(s) ·
+                    <strong>${d.ips}</strong> IP(s)${vlanInfo}
+                    <br><small>Rechargement en cours…</small>
+                </div>`;
+            btn.innerHTML = '<i class="mdi mdi-check"></i> Terminé';
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            result.innerHTML = `<div class="alert alert-danger py-2 mb-0"><i class="mdi mdi-alert-circle"></i> ${data.error}</div>`;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="mdi mdi-delete-sweep"></i> Confirmer la purge';
+        }
+    })
+    .catch(err => {
+        result.style.display = 'block';
+        result.innerHTML = `<div class="alert alert-danger py-2 mb-0">Erreur réseau : ${err}</div>`;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="mdi mdi-delete-sweep"></i> Confirmer la purge';
+    });
+}
+</script>
 {% endblock %}
