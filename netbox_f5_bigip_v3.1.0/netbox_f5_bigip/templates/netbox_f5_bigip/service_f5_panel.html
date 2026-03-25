@@ -1,0 +1,142 @@
+{% load helpers %}
+
+<style>
+.f5-panel {
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    margin-bottom: 1rem;
+}
+.f5-panel-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
+}
+.f5-panel-pool {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
+}
+.f5-badge-info {
+    background: rgba(255,255,255,0.2);
+    color: white;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    font-weight: 500;
+}
+.f5-code {
+    background: #f8f9fa;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+</style>
+
+<div class="f5-panel card">
+  <div class="f5-panel-header">
+    <div class="d-flex justify-content-between align-items-center">
+      <span><i class="mdi mdi-server-network"></i> F5 — Virtual Server</span>
+      {% if partition %}
+      <span class="f5-badge-info">{{ partition }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <tbody>
+        {% if vip %}
+        <tr>
+          <td class="text-muted ps-3" style="width:35%">
+            <i class="mdi mdi-ip"></i> VIP
+          </td>
+          <td><span class="f5-code">{{ vip }}</span></td>
+        </tr>
+        {% endif %}
+        {% if destination %}
+        <tr>
+          <td class="text-muted ps-3">
+            <i class="mdi mdi-target"></i> Destination
+          </td>
+          <td><span class="f5-code">{{ destination }}</span></td>
+        </tr>
+        {% endif %}
+        {% if snat %}
+        <tr>
+          <td class="text-muted ps-3">
+            <i class="mdi mdi-swap-horizontal"></i> SNAT
+          </td>
+          <td><span class="f5-code text-muted">{{ snat }}</span></td>
+        </tr>
+        {% endif %}
+        {% if profiles %}
+        <tr>
+          <td class="text-muted ps-3">
+            <i class="mdi mdi-file-document-outline"></i> Profiles
+          </td>
+          <td>
+            {% for p in profiles %}
+            <span class="badge bg-light text-dark border me-1">{{ p }}</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}
+        {% if irules %}
+        <tr>
+          <td class="text-muted ps-3">
+            <i class="mdi mdi-code-braces"></i> iRules
+          </td>
+          <td>
+            {% for r in irules %}
+            <span class="badge bg-light text-dark border me-1">{{ r }}</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if pool_name %}
+<div class="f5-panel card">
+  <div class="f5-panel-pool">
+    <div class="d-flex justify-content-between align-items-center">
+      <span><i class="mdi mdi-shape"></i> F5 — Pool : {{ pool_name }}</span>
+      {% if members %}
+      <span class="f5-badge-info">{{ members|length }} membre{{ members|length|pluralize }}</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if members %}
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3"><i class="mdi mdi-ip"></i> Adresse</th>
+          <th><i class="mdi mdi-lan"></i> Port</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in members %}
+        <tr>
+          <td class="ps-3"><span class="f5-code">{{ m.address }}</span></td>
+          <td><span class="f5-code">{{ m.port }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card-body text-muted">
+    <i class="mdi mdi-information-outline"></i> Aucun membre dans ce pool.
+  </div>
+  {% endif %}
+
+</div>
+{% endif %}

@@ -1,0 +1,178 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Connexion F5 — {{ device.name }}{% endblock %}
+
+{% block head %}
+{{ block.super }}
+<style>
+.f5-connect-hero {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.f5-info-card {
+    background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    border: none;
+}
+.f5-form-card {
+    border: none;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+.f5-input {
+    border: 2px solid #e1e8ed;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+.f5-input:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+.f5-btn-submit {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    color: white;
+    font-weight: 600;
+    padding: 0.75rem;
+    border-radius: 6px;
+    transition: all 0.3s;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+.f5-btn-submit:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+    color: white;
+}
+.f5-loading {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    color: white;
+    border-radius: 6px;
+    padding: 0.75rem;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+.f5-spinner {
+    animation: pulse 1.5s ease-in-out infinite;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6 offset-md-3">
+
+        <nav aria-label="breadcrumb" class="mb-3">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item">
+                    <a href="{% url 'plugins:netbox_f5_bigip:home' %}">
+                        <i class="mdi mdi-home"></i> F5 BIG-IP
+                    </a>
+                </li>
+                <li class="breadcrumb-item active">Connexion</li>
+            </ol>
+        </nav>
+
+        <div class="f5-connect-hero">
+            <h2 class="mb-0"><i class="mdi mdi-lan-connect"></i> Connexion F5 BIG-IP</h2>
+        </div>
+
+        <!-- Infos device -->
+        <div class="f5-info-card">
+            <div class="row g-3">
+                <div class="col-6">
+                    <small class="text-muted d-block mb-1">
+                        <i class="mdi mdi-server"></i> Équipement
+                    </small>
+                    <strong>{{ device.name }}</strong>
+                </div>
+                <div class="col-3">
+                    <small class="text-muted d-block mb-1">
+                        <i class="mdi mdi-shape"></i> Type
+                    </small>
+                    {% if kind == 'vm' %}
+                    <span class="badge" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;">☁ VM</span>
+                    {% else %}
+                    <span class="badge" style="background:linear-gradient(135deg,#f093fb,#f5576c);color:white;border:none;">⚙ Physique</span>
+                    {% endif %}
+                </div>
+                <div class="col-3">
+                    <small class="text-muted d-block mb-1">
+                        <i class="mdi mdi-ip-network"></i> IP
+                    </small>
+                    <code style="background:white;padding:0.2rem 0.5rem;border-radius:4px;">{{ f5_ip }}</code>
+                </div>
+            </div>
+        </div>
+
+        {% if messages %}
+        {% for msg in messages %}
+        <div class="alert alert-danger alert-dismissible fade show">
+            <i class="mdi mdi-alert-circle"></i> {{ msg }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endfor %}
+        {% endif %}
+
+        <div class="f5-form-card card">
+            <div class="card-body p-4">
+                <form method="post" id="connectForm">
+                    {% csrf_token %}
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">
+                            <i class="mdi mdi-account"></i> Utilisateur F5
+                        </label>
+                        <input type="text" class="form-control f5-input"
+                               name="f5_user" placeholder="admin"
+                               autocomplete="username" autofocus required>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label fw-bold">
+                            <i class="mdi mdi-key"></i> Mot de passe
+                        </label>
+                        <input type="password" class="form-control f5-input"
+                               name="f5_password"
+                               autocomplete="current-password" required>
+                    </div>
+
+                    <div class="d-grid mb-3">
+                        <button type="submit" class="btn f5-btn-submit" id="connectBtn">
+                            <i class="mdi mdi-download"></i> Récupérer la configuration
+                        </button>
+                    </div>
+
+                    <a href="{% url 'plugins:netbox_f5_bigip:home' %}"
+                       class="btn btn-outline-secondary w-100">
+                        <i class="mdi mdi-arrow-left"></i> Retour à la liste
+                    </a>
+                </form>
+
+                <div id="loading" class="mt-3 f5-loading" style="display:none;">
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="spinner-border spinner-border-sm f5-spinner"></span>
+                        <span>Connexion à <code style="background:rgba(255,255,255,0.2);padding:0.2rem 0.4rem;border-radius:3px;">{{ f5_ip }}</code>… (30–60 sec)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+document.getElementById('connectForm').addEventListener('submit', function() {
+    document.getElementById('connectBtn').disabled = true;
+    document.getElementById('loading').style.display = 'block';
+});
+</script>
+{% endblock %}

@@ -1,0 +1,436 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Visualisation F5 — {{ device.name }}{% endblock %}
+
+{% block head %}
+{{ block.super }}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/dataTables.bootstrap5.min.css">
+<style>
+.f5-hero-preview {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.f5-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.f5-stat-card {
+    background: white;
+    border-radius: 8px;
+    padding: 1.25rem;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    border: none;
+    transition: transform 0.2s;
+}
+.f5-stat-card:hover {
+    transform: translateY(-2px);
+}
+.f5-stat-number {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.f5-stat-label {
+    color: #6c757d;
+    font-size: 0.875rem;
+    margin-top: 0.5rem;
+}
+.f5-tabs {
+    border: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.f5-tabs .nav-link {
+    border: none;
+    background: #f8f9fa;
+    color: #495057;
+    font-weight: 500;
+    transition: all 0.3s;
+}
+.f5-tabs .nav-link.active {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+.f5-import-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 100;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 1.25rem 2rem;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.2);
+    border-radius: 8px 8px 0 0;
+}
+.f5-btn-import {
+    background: white;
+    color: #667eea;
+    border: none;
+    font-weight: 600;
+    padding: 0.75rem 2rem;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    transition: all 0.3s;
+}
+.f5-btn-import:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.3);
+    color: #764ba2;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.f5-spinner-custom {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+.f5-progress-bar {
+    background: rgba(255,255,255,0.2);
+    border-radius: 4px;
+    overflow: hidden;
+    height: 6px;
+    margin-top: 0.75rem;
+}
+.f5-progress-fill {
+    background: white;
+    height: 100%;
+    transition: width 0.3s;
+    border-radius: 4px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+
+<nav aria-label="breadcrumb" class="mb-3">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{% url 'plugins:netbox_f5_bigip:home' %}"><i class="mdi mdi-home"></i> F5 BIG-IP</a></li>
+        <li class="breadcrumb-item"><a href="{% url 'plugins:netbox_f5_bigip:connect' kind=kind device_id=device.pk %}">Connexion</a></li>
+        <li class="breadcrumb-item active">Visualisation</li>
+    </ol>
+</nav>
+
+<div class="f5-hero-preview">
+    <div class="d-flex justify-content-between align-items-center">
+        <div>
+            <h2 class="mb-1"><i class="mdi mdi-server"></i> {{ device.name }}</h2>
+            <small class="opacity-75">Configuration F5 récupérée depuis <code style="background:rgba(255,255,255,0.2);padding:0.2rem 0.5rem;border-radius:3px;">{{ f5_host }}</code></small>
+        </div>
+        <a href="{% url 'plugins:netbox_f5_bigip:connect' kind=kind device_id=device.pk %}" class="btn btn-light btn-sm">
+            <i class="mdi mdi-refresh"></i> Reconnecter
+        </a>
+    </div>
+</div>
+
+<!-- Stats cards -->
+<div class="f5-stats-grid">
+    <div class="f5-stat-card">
+        <div class="f5-stat-number">{{ vs_list|length }}</div>
+        <div class="f5-stat-label">Virtual Servers</div>
+    </div>
+    <div class="f5-stat-card">
+        <div class="f5-stat-number">{{ pool_list|length }}</div>
+        <div class="f5-stat-label">Pools</div>
+    </div>
+    <div class="f5-stat-card">
+        <div class="f5-stat-number">{{ node_list|length }}</div>
+        <div class="f5-stat-label">Nodes</div>
+    </div>
+    <div class="f5-stat-card">
+        <div class="f5-stat-number">{{ vlan_list|length }}</div>
+        <div class="f5-stat-label">VLANs</div>
+    </div>
+    <div class="f5-stat-card">
+        <div class="f5-stat-number">{{ selfip_list|length }}</div>
+        <div class="f5-stat-label">Self IPs</div>
+    </div>
+</div>
+
+{% if not vs_list and not pool_list and not node_list %}
+<div class="alert alert-warning">
+    <i class="mdi mdi-alert-circle"></i> <strong>Aucune donnée récupérée.</strong>
+    Vérifiez l'accessibilité de l'équipement et les credentials.
+</div>
+{% endif %}
+
+<!-- Tabs -->
+<ul class="nav nav-tabs f5-tabs" id="dataTabs">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-vs">
+        <i class="mdi mdi-server-network"></i> Virtual Servers <span class="badge bg-light text-dark ms-1">{{ vs_list|length }}</span>
+    </a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-pools">
+        <i class="mdi mdi-shape"></i> Pools <span class="badge bg-light text-dark ms-1">{{ pool_list|length }}</span>
+    </a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-nodes">
+        <i class="mdi mdi-circle-multiple"></i> Nodes <span class="badge bg-light text-dark ms-1">{{ node_list|length }}</span>
+    </a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-vlans">
+        <i class="mdi mdi-lan"></i> VLANs <span class="badge bg-light text-dark ms-1">{{ vlan_list|length }}</span>
+    </a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-selfips">
+        <i class="mdi mdi-ip"></i> Self IPs <span class="badge bg-light text-dark ms-1">{{ selfip_list|length }}</span>
+    </a></li>
+</ul>
+
+<div class="tab-content bg-white p-3 mb-5" style="border-radius:0 0 8px 8px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+    <!-- VS -->
+    <div class="tab-pane fade show active" id="tab-vs">
+        {% if vs_list %}
+        <table id="tbl-vs" class="table table-sm table-hover w-100">
+            <thead><tr>
+                <th>Nom</th><th>Partition</th><th>Destination</th><th>Proto</th><th>Pool</th><th>État</th>
+            </tr></thead>
+            <tbody>
+            {% for vs in vs_list %}
+            <tr>
+                <td><strong>{{ vs.name }}</strong></td>
+                <td><code>{{ vs.partition }}</code></td>
+                <td><code>{{ vs.dest }}</code></td>
+                <td><span class="badge bg-light text-dark border">{{ vs.protocol }}</span></td>
+                <td>{{ vs.pool }}</td>
+                <td>{% if vs.enabled %}<i class="mdi mdi-check-circle text-success"></i>{% else %}<i class="mdi mdi-close-circle text-danger"></i>{% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<div class="alert alert-secondary">Aucun VS récupéré.</div>{% endif %}
+    </div>
+
+    <!-- Pools -->
+    <div class="tab-pane fade" id="tab-pools">
+        {% if pool_list %}
+        <table id="tbl-pools" class="table table-sm table-hover w-100">
+            <thead><tr><th>Nom</th><th>Partition</th><th>Méthode LB</th><th>Membres</th></tr></thead>
+            <tbody>
+            {% for p in pool_list %}
+            <tr>
+                <td><strong>{{ p.name }}</strong></td>
+                <td><code>{{ p.partition }}</code></td>
+                <td><span class="badge bg-light text-dark border">{{ p.lb_method }}</span></td>
+                <td><span class="badge bg-light text-dark border">{{ p.nb }}</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<div class="alert alert-secondary">Aucun Pool.</div>{% endif %}
+    </div>
+
+    <!-- Nodes -->
+    <div class="tab-pane fade" id="tab-nodes">
+        {% if node_list %}
+        <table id="tbl-nodes" class="table table-sm table-hover w-100">
+            <thead><tr><th>Nom</th><th>Adresse</th><th>Partition</th></tr></thead>
+            <tbody>
+            {% for n in node_list %}
+            <tr><td><strong>{{ n.name }}</strong></td><td><code>{{ n.address }}</code></td><td><code>{{ n.partition }}</code></td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<div class="alert alert-secondary">Aucun Node.</div>{% endif %}
+    </div>
+
+    <!-- VLANs -->
+    <div class="tab-pane fade" id="tab-vlans">
+        {% if vlan_list %}
+        <table id="tbl-vlans" class="table table-sm table-hover w-100">
+            <thead><tr><th>Nom</th><th>Tag</th><th>MTU</th><th>Partition</th></tr></thead>
+            <tbody>
+            {% for v in vlan_list %}
+            <tr><td><strong>{{ v.name }}</strong></td><td><span class="badge bg-warning text-dark">{{ v.tag }}</span></td><td>{{ v.mtu }}</td><td><code>{{ v.partition }}</code></td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<div class="alert alert-secondary">Aucun VLAN.</div>{% endif %}
+    </div>
+
+    <!-- Self IPs -->
+    <div class="tab-pane fade" id="tab-selfips">
+        {% if selfip_list %}
+        <table id="tbl-selfips" class="table table-sm table-hover w-100">
+            <thead><tr><th>Nom</th><th>Adresse</th><th>VLAN</th><th>Partition</th></tr></thead>
+            <tbody>
+            {% for s in selfip_list %}
+            <tr><td><strong>{{ s.name }}</strong></td><td><code>{{ s.address }}</code></td><td>{{ s.vlan }}</td><td><code>{{ s.partition }}</code></td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<div class="alert alert-secondary">Aucune Self IP.</div>{% endif %}
+    </div>
+</div>
+
+<!-- Import bar -->
+<div class="f5-import-bar">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <strong>{{ vs_list|length }}</strong> VS · <strong>{{ pool_list|length }}</strong> Pools · 
+            <strong>{{ node_list|length }}</strong> Nodes · <strong>{{ vlan_list|length }}</strong> VLANs · 
+            <strong>{{ selfip_list|length }}</strong> Self IPs
+        </div>
+        <div class="d-flex align-items-center gap-3">
+            <div id="import-spinner" style="display:none;">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="f5-spinner-custom"></span>
+                    <span id="import-status">Import en cours…</span>
+                </div>
+                <div class="f5-progress-bar" id="progress-container" style="display:none;">
+                    <div class="f5-progress-fill" id="progress-fill" style="width:0%"></div>
+                </div>
+            </div>
+            <button class="btn f5-btn-import" id="importBtn" onclick="validerImport()"
+                {% if not vs_list and not pool_list and not node_list %}disabled{% endif %}>
+                <i class="mdi mdi-check-bold"></i> Valider l'import dans NetBox
+            </button>
+        </div>
+    </div>
+    <div id="import-result" class="mt-2" style="display:none;"></div>
+</div>
+
+{% csrf_token %}
+
+<script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
+<script>
+$(function() {
+    const opts = {
+        language: {search:'Filtrer :',lengthMenu:'_MENU_',info:'_START_–_END_ / _TOTAL_',
+                    paginate:{previous:'‹',next:'›'},zeroRecords:'Aucun résultat'},
+        pageLength: 25, order: [[0,'asc']],
+    };
+    {% if vs_list %}$('#tbl-vs').DataTable(opts);{% endif %}
+    {% if pool_list %}$('#tbl-pools').DataTable(opts);{% endif %}
+    {% if node_list %}$('#tbl-nodes').DataTable(opts);{% endif %}
+    {% if vlan_list %}$('#tbl-vlans').DataTable(opts);{% endif %}
+    {% if selfip_list %}$('#tbl-selfips').DataTable(opts);{% endif %}
+    $('a[data-bs-toggle="tab"]').on('shown.bs.tab',()=>$.fn.dataTable.tables({visible:true,api:true}).columns.adjust());
+});
+
+function getCsrf() {
+    return document.querySelector('[name=csrfmiddlewaretoken]').value;
+}
+
+// Demander permission notification
+if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+}
+
+function validerImport() {
+    if (!confirm("Confirmer l'import dans NetBox ?")) return;
+    const btn = document.getElementById('importBtn');
+    const spinner = document.getElementById('import-spinner');
+    const result = document.getElementById('import-result');
+    const progress = document.getElementById('progress-container');
+    const fill = document.getElementById('progress-fill');
+    
+    btn.disabled = true;
+    spinner.style.display = 'block';
+    result.style.display = 'none';
+    progress.style.display = 'block';
+
+    fetch('{% url "plugins:netbox_f5_bigip:import" kind=kind device_id=device.pk %}', {
+        method: 'POST',
+        headers: {'X-CSRFToken': getCsrf()},
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (!data.success) throw new Error(data.error || 'Erreur');
+        pollJob(data.job_id, 0);
+    })
+    .catch(err => {
+        spinner.style.display = 'none';
+        btn.disabled = false;
+        result.style.display = 'block';
+        result.innerHTML = `<div class="alert alert-danger mb-0 py-2"><i class="mdi mdi-alert-circle"></i> ${err.message}</div>`;
+    });
+}
+
+function pollJob(jobId, elapsed) {
+    const spinner = document.getElementById('import-spinner');
+    const status = document.getElementById('import-status');
+    const result = document.getElementById('import-result');
+    const btn = document.getElementById('importBtn');
+    const fill = document.getElementById('progress-fill');
+
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+    status.textContent = `Import en cours… ${timeStr}`;
+    
+    // Animation progress bar (estimation)
+    const progress = Math.min(95, (elapsed / 120) * 100);
+    fill.style.width = progress + '%';
+
+    fetch(`/plugins/f5bigip/job/${jobId}/status/`)
+    .then(r => r.json())
+    .then(data => {
+        if (data.status === 'finished') {
+            fill.style.width = '100%';
+            setTimeout(() => {
+                spinner.style.display = 'none';
+                result.style.display = 'block';
+                const s = data.stats || {};
+                const msg = `
+                    <div class="alert alert-success mb-0 py-3" style="background:white;color:#667eea;border:2px solid #667eea;border-radius:6px;">
+                        <h5 class="mb-2"><i class="mdi mdi-check-circle"></i> Import terminé en ${timeStr}</h5>
+                        <div class="mb-2">
+                            <strong>${s.virtual_servers||0}</strong> VS · 
+                            <strong>${s.pools||0}</strong> Pools · 
+                            <strong>${s.nodes||0}</strong> Nodes · 
+                            <strong>${s.vlans||0}</strong> VLANs · 
+                            <strong>${s.self_ips||0}</strong> Self IPs
+                            ${(s.deleted||0)>0 ? ` · <strong class="text-warning">${s.deleted} supprimés</strong>` : ''}
+                            ${(s.errors||0)>0 ? ` · <strong class="text-danger">${s.errors} erreur(s)</strong>` : ''}
+                        </div>
+                        <div class="mt-3">
+                            <a href="{% url 'plugins:netbox_f5_bigip:home' %}" class="btn btn-sm" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;">
+                                <i class="mdi mdi-home"></i> Accueil
+                            </a>
+                            {% if kind == 'vm' %}
+                            <a href="{% url 'virtualization:virtualmachine' pk=device.pk %}" class="btn btn-sm btn-outline-primary">
+                                <i class="mdi mdi-eye"></i> Voir la VM
+                            </a>
+                            {% else %}
+                            <a href="{% url 'dcim:device' pk=device.pk %}" class="btn btn-sm btn-outline-primary">
+                                <i class="mdi mdi-eye"></i> Voir le device
+                            </a>
+                            {% endif %}
+                        </div>
+                    </div>`;
+                result.innerHTML = msg;
+                
+                // Notification browser
+                if ('Notification' in window && Notification.permission === 'granted') {
+                    new Notification('✅ Import F5 terminé', {
+                        body: `${s.virtual_servers||0} VS importés en ${timeStr}`,
+                        icon: '/static/img/netbox_icon.png',
+                        requireInteraction: true
+                    });
+                }
+            }, 500);
+        } else if (data.status === 'failed') {
+            spinner.style.display = 'none';
+            btn.disabled = false;
+            result.style.display = 'block';
+            result.innerHTML = `<div class="alert alert-danger mb-0 py-2"><i class="mdi mdi-alert-circle"></i> ${data.error}</div>`;
+        } else {
+            setTimeout(() => pollJob(jobId, elapsed + 3), 3000);
+        }
+    })
+    .catch(() => setTimeout(() => pollJob(jobId, elapsed + 3), 3000));
+}
+</script>
+{% endblock %}
