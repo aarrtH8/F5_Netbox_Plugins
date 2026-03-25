@@ -116,26 +116,27 @@ class F5Client:
 
     def get_vlans(self) -> List[Dict[str, Any]]:
         vlans = self._collect('net/vlan', {'expandSubcollections': 'true'})
-        # Normaliser les interfaces taggées
         for vlan in vlans:
             if not isinstance(vlan, dict):
                 continue
-            
-            # interfacesReference contient les interfaces taggées avec ce VLAN
+
+            # interfacesReference.items liste TOUTES les interfaces du VLAN
+            # (taggées ET non-taggées) — on conserve le flag tagged pour NetBox
             interfaces_ref = vlan.get('interfacesReference', {})
-            raw_interfaces = interfaces_ref.get('items', [])
-            
-            # Vérifier que raw_interfaces est bien une liste de dicts
-            tagged = []
+            raw_interfaces = interfaces_ref.get('items', []) if isinstance(interfaces_ref, dict) else []
+
+            vlan_ifaces = []
             if isinstance(raw_interfaces, list):
                 for iface in raw_interfaces:
                     if isinstance(iface, dict):
-                        if iface.get('tagged', False):
-                            name = iface.get('name', '').split('/')[-1]
-                            if name:
-                                tagged.append(name)
-            
-            vlan['tagged_interfaces'] = tagged
+                        name = iface.get('name', '').split('/')[-1]
+                        if name:
+                            vlan_ifaces.append({
+                                'name':   name,
+                                'tagged': iface.get('tagged', True),
+                            })
+
+            vlan['interfaces'] = vlan_ifaces
         return vlans
 
     def get_self_ips(self) -> List[Dict[str, Any]]:
@@ -148,24 +149,25 @@ class F5Client:
     def get_trunks(self) -> List[Dict[str, Any]]:
         """Récupère les agrégations (LACP trunks)."""
         trunks = self._collect('net/trunk')
-        # Normaliser les membres
         for trunk in trunks:
             if not isinstance(trunk, dict):
                 continue
-            
-            interfaces_ref = trunk.get('interfacesReference', {})
-            raw_interfaces = interfaces_ref.get('items', [])
-            
-            # Vérifier que raw_interfaces est bien une liste de dicts
+
+            # L'API F5 net/trunk retourne les membres dans 'interfaces'
+            # (liste de strings comme "1.1") et NON dans 'interfacesReference'
+            raw = trunk.get('interfaces', [])
             members = []
-            if isinstance(raw_interfaces, list):
-                for iface in raw_interfaces:
-                    if isinstance(iface, dict):
+            if isinstance(raw, list):
+                for iface in raw:
+                    if isinstance(iface, str):
+                        members.append(iface.split('/')[-1])
+                    elif isinstance(iface, dict):
                         name = iface.get('name', '').split('/')[-1]
                         if name:
                             members.append(name)
-            
+
             trunk['member_interfaces'] = members
+            logger.debug(f"[F5] Trunk {trunk.get('name')} → membres : {members}")
         return trunks
 
     # ------------------------------------------------------------------ #

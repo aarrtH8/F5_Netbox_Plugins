@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Set
 from django.db import transaction
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
-from dcim.models import Device, Interface, Site
+from dcim.models import Device, Interface
 from virtualization.models import VirtualMachine, VMInterface
 from ipam.models import Service, IPAddress, VLAN, VLANGroup, Prefix
 
@@ -52,10 +52,9 @@ class F5Importer:
 
     # ── Utilitaires ─────────────────────────────────────────────────────── #
 
-    def _get_device_site(self) -> Optional[Site]:
+    def _get_device_site(self):
         """Retourne le site du device (Device ou VirtualMachine via cluster)."""
         if self.kind == 'vm':
-            # VM peut avoir un site direct (NetBox 4.x) ou via cluster
             site = getattr(self.device, 'site', None)
             if site:
                 return site
@@ -65,34 +64,46 @@ class F5Importer:
             return None
         return getattr(self.device, 'site', None)
 
-    def _get_or_create_vlan_group(self, site: Optional[Site]) -> Optional[VLANGroup]:
+    def _parse_device_name(self) -> tuple:
         """
-        Retourne ou crée un VLANGroup F5 scopé sur le site donné.
-        Nommage : "F5 — {site.name}" / slug : "f5-{site.slug}"
-        Idempotent : renvoie toujours le même groupe pour le site.
+        Extrait le code DC et le code tenant depuis le nom du device F5.
+
+        Format attendu : {PREFIX}{DC}{TENANT}LDB{NUM}{ENV}
+        Exemple       : THSDC1IANLDB01P → ('DC1', 'IAN')
+                        THSDC2XYZLDB03P → ('DC2', 'XYZ')
+
+        Retourne ('', '') si le pattern ne correspond pas.
         """
-        if not site:
-            return None
+        match = re.search(r'(DC\d+)([A-Z]+)LDB', self.device.name.upper())
+        if match:
+            return match.group(1), match.group(2)
+        logger.warning(f'[F5] Impossible de parser DC/tenant depuis : {self.device.name!r}')
+        return '', ''
+
+    def _get_or_create_vlan_group(self) -> Optional[VLANGroup]:
+        """
+        Retourne ou crée un VLANGroup basé sur le nom du device F5.
+        Nommage : "DC1 IAN"  /  slug : "f5-dc1-ian"
+        Idempotent — caché pour toute la durée de l'import.
+        """
         if self._vlan_group is not None:
             return self._vlan_group
+        dc, tenant = self._parse_device_name()
+        if not dc or not tenant:
+            return None
         try:
-            ct_site   = ContentType.objects.get_for_model(Site)
-            group_slug = f'f5-{site.slug}'
-            group_name = f'F5 — {site.name}'
+            group_name = f'{dc} {tenant}'
+            group_slug = f'f5-{dc.lower()}-{tenant.lower()}'
             group, created = VLANGroup.objects.get_or_create(
                 slug=group_slug,
-                defaults={
-                    'name':       group_name,
-                    'scope_type': ct_site,
-                    'scope_id':   site.pk,
-                }
+                defaults={'name': group_name},
             )
             if created:
-                logger.info(f'[F5] VLANGroup créé : "{group_name}" (site {site.name})')
+                logger.info(f'[F5] VLANGroup créé : "{group_name}"')
             self._vlan_group = group
             return group
         except Exception as e:
-            logger.warning(f'[F5] VLANGroup {site.name} : {e}')
+            logger.warning(f'[F5] VLANGroup : {e}')
             return None
 
     def _extract_ip_port(self, destination: str):
@@ -373,10 +384,18 @@ class F5Importer:
             logger.error(f'Node {name} : {e}')
             self.stats['errors'] += 1
 
+    def _set_interface_mode(self, nb_iface, mode: str):
+        """Force le mode de l'interface NetBox si elle n'en a pas encore un."""
+        if hasattr(nb_iface, 'mode') and not nb_iface.mode:
+            nb_iface.mode = mode
+            nb_iface.save(update_fields=['mode'])
+
     def _import_vlan(self, data: dict):
-        name              = data.get('name', '')
-        tag               = data.get('tag')
-        tagged_interfaces = data.get('tagged_interfaces', [])
+        name           = data.get('name', '')
+        tag            = data.get('tag')
+        # 'interfaces' est le nouveau champ (liste de dicts {name, tagged})
+        # 'tagged_interfaces' conservé pour compat avec d'éventuels inventaires anciens
+        vlan_interfaces = data.get('interfaces', data.get('tagged_interfaces', []))
 
         if not name:
             return
@@ -388,10 +407,10 @@ class F5Importer:
 
                 device_tenant = getattr(self.device, 'tenant', None)
                 site          = self._get_device_site()
-                group         = self._get_or_create_vlan_group(site)
+                group         = self._get_or_create_vlan_group()
 
-                # Recherche du VLAN existant — ordre de priorité :
-                # 1. Même groupe (le plus précis, évite les doublons cross-site)
+                # Recherche VLAN existant — ordre de priorité :
+                # 1. Même VLANGroup (le plus précis — évite doublons cross-DC)
                 # 2. Même tenant + site
                 # 3. Même tenant
                 # 4. Sans tenant
@@ -414,7 +433,7 @@ class F5Importer:
                     vlan = VLAN.objects.filter(vid=vid).first()
 
                 if vlan:
-                    # VLAN existant : enrichir avec groupe/site/tenant si absents
+                    # Enrichir le VLAN existant si des champs sont absents
                     updated_fields = []
                     if group and not vlan.group:
                         vlan.group = group
@@ -427,10 +446,11 @@ class F5Importer:
                         updated_fields.append('tenant')
                     if updated_fields:
                         vlan.save(update_fields=updated_fields)
-                    logger.info(f'[F5] VLAN {vid} existant réutilisé : "{vlan.name}"'
-                                + (f' → enrichi ({", ".join(updated_fields)})' if updated_fields else ''))
+                    logger.info(
+                        f'[F5] VLAN {vid} existant réutilisé : "{vlan.name}"'
+                        + (f' → enrichi ({", ".join(updated_fields)})' if updated_fields else '')
+                    )
                 else:
-                    # Créer le VLAN avec toutes les métadonnées NetBox
                     vlan = VLAN(
                         vid=vid,
                         name=name,
@@ -440,25 +460,53 @@ class F5Importer:
                         tenant=device_tenant,
                     )
                     vlan.save()
-                    logger.info(f'[F5] VLAN créé : {name} (VID {vid}'
-                                f', site {site.name if site else "N/A"}'
-                                f', groupe {group.name if group else "N/A"})')
+                    logger.info(
+                        f'[F5] VLAN créé : {name} (VID {vid}'
+                        f', groupe {group.name if group else "N/A"}'
+                        f', site {site.name if site else "N/A"})'
+                    )
                     self._associate_vlan_to_prefix(vlan)
 
                 self._vlan_cache[vid] = vlan
                 self._imported_vlan_ids.add(vlan.pk)
                 self.stats['vlans'] += 1
 
-                # Associer aux interfaces NetBox taggées
-                if isinstance(tagged_interfaces, list):
-                    for f5_iface in tagged_interfaces:
-                        if not isinstance(f5_iface, str):
-                            continue
-                        for nb_iface in self._resolve_f5_interface_to_netbox(f5_iface):
-                            if hasattr(nb_iface, 'tagged_vlans'):
-                                if vlan not in nb_iface.tagged_vlans.all():
-                                    nb_iface.tagged_vlans.add(vlan)
-                                    logger.info(f'[F5] VLAN {vid} ajouté à {nb_iface.name}')
+                # ── Association aux interfaces NetBox ──────────────────────
+                # Chaque entrée peut être :
+                #   - dict {'name': 'trunk1', 'tagged': True}   (nouveau format)
+                #   - str  'trunk1'                              (ancien format)
+                for iface_info in (vlan_interfaces or []):
+                    if isinstance(iface_info, dict):
+                        f5_name   = iface_info.get('name', '')
+                        is_tagged = iface_info.get('tagged', True)
+                    elif isinstance(iface_info, str):
+                        f5_name   = iface_info
+                        is_tagged = True
+                    else:
+                        continue
+
+                    if not f5_name:
+                        continue
+
+                    nb_ifaces = self._resolve_f5_interface_to_netbox(f5_name)
+                    if not nb_ifaces:
+                        logger.debug(f'[F5] Interface F5 {f5_name!r} sans correspondance NetBox')
+                        continue
+
+                    for nb_iface in nb_ifaces:
+                        if is_tagged:
+                            # Interface en trunk → tagged_vlans
+                            self._set_interface_mode(nb_iface, 'tagged')
+                            if hasattr(nb_iface, 'tagged_vlans') and vlan not in nb_iface.tagged_vlans.all():
+                                nb_iface.tagged_vlans.add(vlan)
+                                logger.info(f'[F5] VLAN {vid} (tagged) → {nb_iface.name}')
+                        else:
+                            # Interface en access → untagged_vlan
+                            self._set_interface_mode(nb_iface, 'access')
+                            if hasattr(nb_iface, 'untagged_vlan') and nb_iface.untagged_vlan != vlan:
+                                nb_iface.untagged_vlan = vlan
+                                nb_iface.save(update_fields=['untagged_vlan'])
+                                logger.info(f'[F5] VLAN {vid} (untagged) → {nb_iface.name}')
 
         except Exception as e:
             logger.error(f'VLAN {name} (VID {tag}) : {e}')
