@@ -39,6 +39,8 @@ class F5Client:
         """Appel générique qui retourne la liste items, ou [] si vide/erreur."""
         try:
             data = self._get(endpoint, params)
+            if isinstance(data, list):
+                return data
             items = data.get('items', [])
             logger.debug(f"F5 {endpoint} → {len(items)} items")
             return items
