@@ -7,9 +7,9 @@ from typing import Dict, Any, Optional, Set
 from django.db import transaction
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, Site
 from virtualization.models import VirtualMachine, VMInterface
-from ipam.models import Service, IPAddress, VLAN, Prefix
+from ipam.models import Service, IPAddress, VLAN, VLANGroup, Prefix
 
 logger = logging.getLogger('netbox.plugins.netbox_f5_bigip')
 
@@ -35,19 +35,65 @@ class F5Importer:
             'errors':          0,
             'deleted':         0,
         }
-        self._ip_cache = {}
-        
+        self._ip_cache: Dict[str, int] = {}
+
         # Tracking pour synchronisation
         self._imported_service_ids: Set[int] = set()
         self._imported_ip_ids: Set[int] = set()
         self._imported_vlan_ids: Set[int] = set()
-        
+
         # Mapping interfaces F5 → NetBox et trunks
-        self._interface_map: Dict[str, Any] = {}  # 'eth1' → Interface NetBox
-        self._trunk_members: Dict[str, list] = {}  # 'trunk1' → ['eth1', 'eth2']
-        self._vlan_cache: Dict[int, VLAN] = {}  # VID → VLAN NetBox
+        self._interface_map: Dict[str, Any] = {}
+        self._trunk_members: Dict[str, list] = {}
+        self._vlan_cache: Dict[int, VLAN] = {}
+
+        # VLANGroup partagé pour le site du device (créé au premier besoin)
+        self._vlan_group: Optional[VLANGroup] = None
 
     # ── Utilitaires ─────────────────────────────────────────────────────── #
+
+    def _get_device_site(self) -> Optional[Site]:
+        """Retourne le site du device (Device ou VirtualMachine via cluster)."""
+        if self.kind == 'vm':
+            # VM peut avoir un site direct (NetBox 4.x) ou via cluster
+            site = getattr(self.device, 'site', None)
+            if site:
+                return site
+            cluster = getattr(self.device, 'cluster', None)
+            if cluster:
+                return getattr(cluster, 'site', None)
+            return None
+        return getattr(self.device, 'site', None)
+
+    def _get_or_create_vlan_group(self, site: Optional[Site]) -> Optional[VLANGroup]:
+        """
+        Retourne ou crée un VLANGroup F5 scopé sur le site donné.
+        Nommage : "F5 — {site.name}" / slug : "f5-{site.slug}"
+        Idempotent : renvoie toujours le même groupe pour le site.
+        """
+        if not site:
+            return None
+        if self._vlan_group is not None:
+            return self._vlan_group
+        try:
+            ct_site   = ContentType.objects.get_for_model(Site)
+            group_slug = f'f5-{site.slug}'
+            group_name = f'F5 — {site.name}'
+            group, created = VLANGroup.objects.get_or_create(
+                slug=group_slug,
+                defaults={
+                    'name':       group_name,
+                    'scope_type': ct_site,
+                    'scope_id':   site.pk,
+                }
+            )
+            if created:
+                logger.info(f'[F5] VLANGroup créé : "{group_name}" (site {site.name})')
+            self._vlan_group = group
+            return group
+        except Exception as e:
+            logger.warning(f'[F5] VLANGroup {site.name} : {e}')
+            return None
 
     def _extract_ip_port(self, destination: str):
         if not destination:
@@ -64,7 +110,13 @@ class F5Importer:
                 return ip, None
         return dest, None
 
-    def _get_or_create_ip(self, address: str, description: str) -> Optional[IPAddress]:
+    def _get_or_create_ip(self, address: str, description: str,
+                           tenant=None, role: str = '',
+                           status: str = 'active') -> Optional[IPAddress]:
+        """
+        Crée ou récupère une IPAddress NetBox.
+        Hérite du tenant du device, applique le rôle et le statut fournis.
+        """
         if not address or address in ('any', '0.0.0.0'):
             return None
         addr = address.split('%')[0]
@@ -73,13 +125,37 @@ class F5Importer:
         if addr in self._ip_cache:
             return IPAddress.objects.filter(pk=self._ip_cache[addr]).first()
         try:
+            defaults: Dict[str, Any] = {
+                'description': description,
+                'status':      status,
+            }
+            if role:
+                defaults['role'] = role
+            if tenant:
+                defaults['tenant'] = tenant
+
             obj, created = IPAddress.objects.get_or_create(
                 address=addr,
-                defaults={'description': description}
+                defaults=defaults,
             )
-            if not created and description and not obj.description:
-                obj.description = description
-                obj.save(update_fields=['description'])
+            if not created:
+                # Mise à jour partielle des champs absents seulement
+                updated_fields = []
+                if description and not obj.description:
+                    obj.description = description
+                    updated_fields.append('description')
+                if status and obj.status != status:
+                    obj.status = status
+                    updated_fields.append('status')
+                if role and not obj.role:
+                    obj.role = role
+                    updated_fields.append('role')
+                if tenant and not obj.tenant:
+                    obj.tenant = tenant
+                    updated_fields.append('tenant')
+                if updated_fields:
+                    obj.save(update_fields=updated_fields)
+
             self._ip_cache[addr] = obj.pk
             self._imported_ip_ids.add(obj.pk)
             return obj
@@ -88,36 +164,32 @@ class F5Importer:
             return None
 
     def _set_cf(self, obj, updates: dict):
-        # Protéger contre custom_field_data qui serait une liste au lieu d'un dict
-        if isinstance(obj.custom_field_data, dict):
-            cf = dict(obj.custom_field_data)
-        else:
-            cf = {}
+        cf = dict(obj.custom_field_data) if isinstance(obj.custom_field_data, dict) else {}
         cf.update(updates)
         obj.custom_field_data = cf
 
     def _save_service(self, name: str, vip: str, port: int,
                       protocol: str, description: str) -> Optional[Service]:
         """
-        Crée ou met à jour un Service avec nom formaté : "VS_NAME (IP:PORT)"
-        Compatible NetBox 4.6+ avec GenericForeignKey parent_object_type/id.
+        Crée ou met à jour un Service NetBox.
+        Nom format : "VS_NAME (IP:PORT)" — tronqué à 100 chars (limite NetBox).
+        Utilise le GenericFK parent_object_type/id (NetBox 4.x).
         """
-        # Format du nom : "VS_NAME (IP:PORT)"
         display_name = f"{name} ({vip}:{port})" if vip else name
+        # Limite NetBox : Service.name max_length=100
+        display_name = display_name[:100]
 
         if self.kind == 'vm':
             ct = ContentType.objects.get_for_model(VirtualMachine)
         else:
             ct = ContentType.objects.get_for_model(Device)
 
-        # Chercher par nom original (pour retrouver les anciens)
+        # Chercher par nom VS original, puis nom formaté
         qs = Service.objects.filter(
             name=name,
             parent_object_type=ct,
             parent_object_id=self.device.pk,
         )
-
-        # Sinon chercher par nom formaté
         if not qs.exists():
             qs = Service.objects.filter(
                 name=display_name,
@@ -127,7 +199,7 @@ class F5Importer:
 
         if qs.exists():
             service = qs.first()
-            service.name        = display_name  # mise à jour du nom
+            service.name        = display_name
             service.protocol    = protocol
             service.ports       = [port]
             service.description = description
@@ -148,14 +220,18 @@ class F5Importer:
         return service
 
     def _link_vip_to_service(self, service: Service, ip_str: str, vs_name: str):
-        """Crée l'IPAddress VIP et la lie au Service via M2M ipaddresses."""
+        """Crée l'IPAddress VIP (role=vip) et la lie au Service via M2M ipaddresses."""
         if not ip_str or ip_str in ('any', '0.0.0.0'):
             return
-
-        vip = self._get_or_create_ip(ip_str, f'[F5 VIP] {vs_name} ({self.device.name})')
+        tenant = getattr(self.device, 'tenant', None)
+        vip = self._get_or_create_ip(
+            ip_str,
+            f'[F5 VIP] {vs_name} ({self.device.name})',
+            tenant=tenant,
+            role='vip',
+        )
         if not vip:
             return
-
         try:
             service.ipaddresses.add(vip)
         except Exception as e:
@@ -163,102 +239,68 @@ class F5Importer:
 
     def _associate_vlan_to_prefix(self, vlan: VLAN):
         """
-        Associe automatiquement le VLAN créé à un préfixe existant dans NetBox
-        en cherchant les préfixes qui correspondent au VLAN tag.
+        Associe le VLAN créé à un préfixe existant dans NetBox
+        (cherche par correspondance de nom dans le même site).
         """
         try:
-            # Chercher les préfixes qui ont ce VLAN tag dans leurs custom fields
-            # ou qui correspondent au sous-réseau du VLAN
-            # Pour l'instant : association simple via VLAN ID
-            prefixes = Prefix.objects.filter(vlan__isnull=True)
-            
-            # Essayer de trouver un préfixe candidat
-            # (logique à affiner selon votre nommage)
-            # Par exemple : chercher un préfixe dont le nom contient le nom du VLAN
-            candidates = prefixes.filter(description__icontains=vlan.name)[:1]
-            
+            qs = Prefix.objects.filter(vlan__isnull=True)
+            if vlan.site:
+                qs = qs.filter(site=vlan.site)
+            candidates = qs.filter(description__icontains=vlan.name)[:1]
             if candidates:
                 prefix = candidates[0]
                 prefix.vlan = vlan
                 prefix.save(update_fields=['vlan'])
                 logger.info(f'[F5] VLAN {vlan.name} associé au préfixe {prefix}')
         except Exception as e:
-            logger.debug(f'Association VLAN→Prefix : {e}')
+            logger.debug(f'[F5] Association VLAN→Prefix : {e}')
 
     def _build_interface_mapping(self, interfaces: list, trunks: list):
         """
         Construit le mapping entre interfaces F5 et interfaces NetBox.
         Gère aussi les trunks/agrégations.
-        
-        Format F5 : "1.1", "1.2", "trunk1"
-        Format NetBox : cherche par nom dans l'équipement
         """
-        # 1. Mapper les trunks vers leurs membres
         if isinstance(trunks, list):
             for trunk in trunks:
                 if not isinstance(trunk, dict):
                     continue
-                trunk_name = trunk.get('name', '').split('/')[-1]  # Ex: "trunk1"
-                members = trunk.get('member_interfaces', [])  # Ex: ["1.1", "1.2"]
+                trunk_name = trunk.get('name', '').split('/')[-1]
+                members    = trunk.get('member_interfaces', [])
                 if trunk_name and members:
                     self._trunk_members[trunk_name] = members
                     logger.debug(f'[F5] Trunk {trunk_name} → {members}')
-        
-        # 2. Mapper les interfaces F5 vers interfaces NetBox
+
         if self.kind == 'vm':
             netbox_interfaces = VMInterface.objects.filter(virtual_machine=self.device)
         else:
             netbox_interfaces = Interface.objects.filter(device=self.device)
-        
+
         for iface in netbox_interfaces:
-            # Normaliser le nom NetBox pour matcher F5
-            # Ex: "eth1" → "1.1", "GigabitEthernet0/1" → "0/1"
             f5_name = self._normalize_interface_name(iface.name)
             if f5_name:
                 self._interface_map[f5_name] = iface
                 logger.debug(f'[F5] Mapping {f5_name} (F5) → {iface.name} (NetBox)')
 
     def _normalize_interface_name(self, name: str) -> str:
-        """
-        Convertit un nom d'interface NetBox vers le format F5.
-        Ex: "eth1" → "1.1", "GigabitEthernet1/1" → "1.1"
-        """
-        # Patterns courants F5 : "1.1", "1.2", "2.1"
-        # Essayer d'extraire les chiffres
+        """Convertit un nom d'interface NetBox vers le format F5 (ex: "1.1")."""
         match = re.search(r'(\d+)[./](\d+)', name)
         if match:
             return f"{match.group(1)}.{match.group(2)}"
-        
-        # Si c'est juste "eth1" → "1.1"
         match = re.search(r'eth(\d+)', name.lower())
         if match:
             return f"1.{match.group(1)}"
-        
-        # Sinon retourner tel quel
         return name
 
     def _resolve_f5_interface_to_netbox(self, f5_interface: str) -> list:
-        """
-        Résout une interface F5 (qui peut être un trunk) vers les interfaces NetBox.
-        
-        Args:
-            f5_interface: Nom interface F5, ex: "1.1" ou "trunk1"
-        
-        Returns:
-            Liste d'interfaces NetBox correspondantes
-        """
-        # Si c'est un trunk, résoudre vers les membres
+        """Résout une interface F5 (ou trunk) vers les interfaces NetBox correspondantes."""
         if f5_interface in self._trunk_members:
-            netbox_interfaces = []
-            for member in self._trunk_members[f5_interface]:
-                if member in self._interface_map:
-                    netbox_interfaces.append(self._interface_map[member])
-            return netbox_interfaces
-        
-        # Sinon chercher directement l'interface
+            return [
+                self._interface_map[m]
+                for m in self._trunk_members[f5_interface]
+                if m in self._interface_map
+            ]
         if f5_interface in self._interface_map:
             return [self._interface_map[f5_interface]]
-        
         return []
 
     # ── Import principal ─────────────────────────────────────────────────── #
@@ -270,49 +312,45 @@ class F5Importer:
         except Exception as e:
             logger.warning(f'Custom fields : {e}')
 
-        logger.info(f'Import F5 → {self.device.name}')
+        logger.info(f'[F5] Import → {self.device.name}')
 
-        # 1. Construire le mapping des interfaces et trunks
-        interfaces = inventory.get('interfaces', [])
-        trunks = inventory.get('trunks', [])
-        self._build_interface_mapping(interfaces, trunks)
+        # 1. Mapping interfaces / trunks
+        self._build_interface_mapping(
+            inventory.get('interfaces', []),
+            inventory.get('trunks', []),
+        )
 
-        # 2. Importer nodes, vlans, self IPs
+        # 2. Nodes, VLANs, Self IPs
         for node in inventory.get('nodes', []):
-            if not isinstance(node, dict):
-                continue
-            self._import_node(node)
+            if isinstance(node, dict):
+                self._import_node(node)
 
         for vlan in inventory.get('vlans', []):
-            if not isinstance(vlan, dict):
-                continue
-            self._import_vlan(vlan)
+            if isinstance(vlan, dict):
+                self._import_vlan(vlan)
 
         for selfip in inventory.get('self_ips', []):
-            if not isinstance(selfip, dict):
-                continue
-            self._import_self_ip(selfip)
+            if isinstance(selfip, dict):
+                self._import_self_ip(selfip)
 
-        # 3. Importer pools et VS
-        pools_by_name = {}
+        # 3. Pools + Virtual Servers
+        pools_by_name: Dict[str, dict] = {}
         for pool in inventory.get('pools', []):
-            if not isinstance(pool, dict):
-                continue
-            name = pool.get('name', '')
-            if name:
-                pools_by_name[name] = pool
-                self.stats['pools'] += 1
+            if isinstance(pool, dict):
+                name = pool.get('name', '')
+                if name:
+                    pools_by_name[name] = pool
+                    self.stats['pools'] += 1
 
         for vs in inventory.get('virtual_servers', []):
-            if not isinstance(vs, dict):
-                continue
-            self._import_vs(vs, pools_by_name)
+            if isinstance(vs, dict):
+                self._import_vs(vs, pools_by_name)
 
-        # ── Synchronisation : supprimer les objets orphelins ──────────────
+        # 4. Nettoyage des objets orphelins
         self._cleanup_orphaned_objects()
 
         self._update_device()
-        logger.info(f'Import terminé : {self.stats}')
+        logger.info(f'[F5] Import terminé : {self.stats}')
         return self.stats
 
     # ── Objets individuels ───────────────────────────────────────────────── #
@@ -324,17 +362,22 @@ class F5Importer:
             return
         try:
             with transaction.atomic():
-                if self._get_or_create_ip(address, f'[F5 Node] {name} ({self.device.name})'):
+                tenant = getattr(self.device, 'tenant', None)
+                if self._get_or_create_ip(
+                    address,
+                    f'[F5 Node] {name} ({self.device.name})',
+                    tenant=tenant,
+                ):
                     self.stats['nodes'] += 1
         except Exception as e:
             logger.error(f'Node {name} : {e}')
             self.stats['errors'] += 1
 
     def _import_vlan(self, data: dict):
-        name = data.get('name', '')
-        tag  = data.get('tag')
-        tagged_interfaces = data.get('tagged_interfaces', [])  # Interfaces F5 taggées
-        
+        name              = data.get('name', '')
+        tag               = data.get('tag')
+        tagged_interfaces = data.get('tagged_interfaces', [])
+
         if not name:
             return
         try:
@@ -342,143 +385,151 @@ class F5Importer:
                 vid = int(tag) if tag else None
                 if not vid or not (1 <= vid <= 4094):
                     return
-                
-                # Chercher VLAN existant par VID (ordre de priorité)
-                # 1. Même tenant que le device (si tenant défini)
-                # 2. Sans tenant
-                # 3. N'importe lequel avec ce VID
-                vlan = None
-                
+
                 device_tenant = getattr(self.device, 'tenant', None)
-                
-                if device_tenant:
-                    # Chercher dans le même tenant d'abord
+                site          = self._get_device_site()
+                group         = self._get_or_create_vlan_group(site)
+
+                # Recherche du VLAN existant — ordre de priorité :
+                # 1. Même groupe (le plus précis, évite les doublons cross-site)
+                # 2. Même tenant + site
+                # 3. Même tenant
+                # 4. Sans tenant
+                # 5. N'importe lequel avec ce VID
+                vlan = None
+
+                if group:
+                    vlan = VLAN.objects.filter(vid=vid, group=group).first()
+
+                if not vlan and device_tenant and site:
+                    vlan = VLAN.objects.filter(vid=vid, tenant=device_tenant, site=site).first()
+
+                if not vlan and device_tenant:
                     vlan = VLAN.objects.filter(vid=vid, tenant=device_tenant).first()
-                
+
                 if not vlan:
-                    # Chercher sans tenant
                     vlan = VLAN.objects.filter(vid=vid, tenant__isnull=True).first()
-                
+
                 if not vlan:
-                    # Dernier recours : n'importe quel VLAN avec ce VID
                     vlan = VLAN.objects.filter(vid=vid).first()
-                
+
                 if vlan:
-                    # VLAN existe déjà → RÉUTILISER sans modifier le nom
-                    logger.info(f'[F5] VLAN {vid} existant réutilisé : "{vlan.name}" (nom conservé)')
+                    # VLAN existant : enrichir avec groupe/site/tenant si absents
+                    updated_fields = []
+                    if group and not vlan.group:
+                        vlan.group = group
+                        updated_fields.append('group')
+                    if site and not vlan.site:
+                        vlan.site = site
+                        updated_fields.append('site')
+                    if device_tenant and not vlan.tenant:
+                        vlan.tenant = device_tenant
+                        updated_fields.append('tenant')
+                    if updated_fields:
+                        vlan.save(update_fields=updated_fields)
+                    logger.info(f'[F5] VLAN {vid} existant réutilisé : "{vlan.name}"'
+                                + (f' → enrichi ({", ".join(updated_fields)})' if updated_fields else ''))
                 else:
-                    # Créer nouveau VLAN uniquement si aucun n'existe
+                    # Créer le VLAN avec toutes les métadonnées NetBox
                     vlan = VLAN(
                         vid=vid,
                         name=name,
-                        tenant=device_tenant if device_tenant else None
+                        status='active',
+                        site=site,
+                        group=group,
+                        tenant=device_tenant,
                     )
                     vlan.save()
-                    logger.info(f'[F5] VLAN créé : {name} (VID {vid})')
-                    # Essayer d'associer à un préfixe existant
+                    logger.info(f'[F5] VLAN créé : {name} (VID {vid}'
+                                f', site {site.name if site else "N/A"}'
+                                f', groupe {group.name if group else "N/A"})')
                     self._associate_vlan_to_prefix(vlan)
-                
-                # Stocker dans cache pour les self IPs
+
                 self._vlan_cache[vid] = vlan
                 self._imported_vlan_ids.add(vlan.pk)
                 self.stats['vlans'] += 1
-                
-                # Associer les interfaces NetBox correspondantes
+
+                # Associer aux interfaces NetBox taggées
                 if isinstance(tagged_interfaces, list):
                     for f5_iface in tagged_interfaces:
                         if not isinstance(f5_iface, str):
                             continue
-                        netbox_ifaces = self._resolve_f5_interface_to_netbox(f5_iface)
-                        for nb_iface in netbox_ifaces:
-                            # Ajouter le VLAN aux tagged_vlans de l'interface
+                        for nb_iface in self._resolve_f5_interface_to_netbox(f5_iface):
                             if hasattr(nb_iface, 'tagged_vlans'):
                                 if vlan not in nb_iface.tagged_vlans.all():
                                     nb_iface.tagged_vlans.add(vlan)
                                     logger.info(f'[F5] VLAN {vid} ajouté à {nb_iface.name}')
-                                else:
-                                    logger.debug(f'[F5] VLAN {vid} déjà présent sur {nb_iface.name}')
-                
+
         except Exception as e:
             logger.error(f'VLAN {name} (VID {tag}) : {e}')
             self.stats['errors'] += 1
 
     def _import_self_ip(self, data: dict):
-        name    = data.get('name', '')
-        address = data.get('address', '').split('%')[0]
+        name     = data.get('name', '')
+        address  = data.get('address', '').split('%')[0]
         vlan_ref = data.get('vlan', '')  # Ex: "/Common/vlan100"
-        
+
         if not name or not address:
             return
-        
+
         try:
             with transaction.atomic():
-                # 1. Trouver le VLAN correspondant
+                tenant    = getattr(self.device, 'tenant', None)
                 vlan_name = vlan_ref.split('/')[-1] if vlan_ref else None
+
+                # Trouver le VLAN correspondant dans le cache
                 vlan = None
-                
-                # Chercher le VLAN par nom dans ceux qu'on a importés
                 if vlan_name:
                     for vid, v in self._vlan_cache.items():
-                        # Matcher le nom F5 avec le nom NetBox (ou l'ancien nom)
                         if vlan_name.lower() in v.name.lower() or str(vid) in vlan_name:
                             vlan = v
                             break
-                
-                # 2. Créer ou récupérer l'IP
+
                 if '/' not in address:
                     address += '/32'
-                
-                ip_obj = IPAddress.objects.filter(address=address).first()
-                
+
+                # Créer ou récupérer l'IP (statut active, tenant propagé)
+                ip_obj = self._get_or_create_ip(
+                    address,
+                    f'[F5 Self IP] {name} ({self.device.name})',
+                    tenant=tenant,
+                )
                 if not ip_obj:
-                    # Créer nouvelle IP
-                    ip_obj = IPAddress(
-                        address=address,
-                        description=f'[F5 Self IP] {name} ({self.device.name})',
-                        vrf=None,
-                    )
-                    ip_obj.save()
-                    logger.info(f'[F5] Self IP créée : {address} → VLAN {vlan.name if vlan else "N/A"}')
-                else:
-                    # IP existe déjà → réutiliser
-                    logger.info(f'[F5] Self IP existante réutilisée : {address}')
-                    # Mettre à jour la description si nécessaire
-                    new_desc = f'[F5 Self IP] {name} ({self.device.name})'
-                    if ip_obj.description != new_desc:
-                        ip_obj.description = new_desc
-                        ip_obj.save(update_fields=['description'])
-                
-                # 3. Associer au VLAN si trouvé
+                    return
+
+                # Associer au VLAN
                 if vlan and ip_obj.vlan != vlan:
                     ip_obj.vlan = vlan
                     ip_obj.save(update_fields=['vlan'])
                     logger.info(f'[F5] IP {address} associée au VLAN {vlan.name}')
-                
-                # 4. Associer à l'interface NetBox
-                # Chercher quelle interface porte ce VLAN
+
+                # Associer à l'interface NetBox qui porte ce VLAN
+                # Utiliser les champs GFK explicites (assigned_object_type / id)
                 if vlan:
-                    # Chercher l'interface qui a ce VLAN en tagged
                     if self.kind == 'vm':
                         candidate_ifaces = VMInterface.objects.filter(
                             virtual_machine=self.device,
-                            tagged_vlans=vlan
+                            tagged_vlans=vlan,
                         )
                     else:
                         candidate_ifaces = Interface.objects.filter(
                             device=self.device,
-                            tagged_vlans=vlan
+                            tagged_vlans=vlan,
                         )
-                    
+
                     if candidate_ifaces.exists():
                         target_iface = candidate_ifaces.first()
-                        if ip_obj.assigned_object != target_iface:
-                            ip_obj.assigned_object = target_iface
-                            ip_obj.save()
+                        ct = ContentType.objects.get_for_model(type(target_iface))
+                        if (ip_obj.assigned_object_type != ct
+                                or ip_obj.assigned_object_id != target_iface.pk):
+                            ip_obj.assigned_object_type = ct
+                            ip_obj.assigned_object_id   = target_iface.pk
+                            ip_obj.save(update_fields=['assigned_object_type',
+                                                       'assigned_object_id'])
                             logger.info(f'[F5] IP {address} assignée à {target_iface.name}')
-                
-                self._imported_ip_ids.add(ip_obj.pk)
+
                 self.stats['self_ips'] += 1
-                
+
         except Exception as e:
             logger.error(f'Self IP {name} : {e}')
             self.stats['errors'] += 1
@@ -499,37 +550,24 @@ class F5Importer:
         pool_data = pools_by_name.get(pool_name, {})
         members   = pool_data.get('members_list', [])
 
-        # Format JSON sans state/session (pas de monitoring dans NetBox)
-        # Sécuriser : vérifier que members est une liste de dicts
         members_clean = []
         if isinstance(members, list):
             for m in members:
                 if isinstance(m, dict):
                     members_clean.append({
                         'address': m.get('address', ''),
-                        'port': m.get('port', 0)
+                        'port':    m.get('port', 0),
                     })
         members_json = json.dumps(members_clean)
 
-        # Sécuriser profiles et rules
         profiles = data.get('profiles', [])
-        if isinstance(profiles, list):
-            profiles_str = ', '.join([str(p) for p in profiles if p])
-        else:
-            profiles_str = ''
+        profiles_str = ', '.join([str(p) for p in profiles if p]) if isinstance(profiles, list) else ''
 
         rules = data.get('rules', [])
-        if isinstance(rules, list):
-            rules_str = ', '.join([str(r) for r in rules if r])
-        else:
-            rules_str = ''
+        rules_str = ', '.join([str(r) for r in rules if r]) if isinstance(rules, list) else ''
 
-        # Sécuriser sourceAddressTranslation
         snat_data = data.get('sourceAddressTranslation', {})
-        if isinstance(snat_data, dict):
-            snat_type = snat_data.get('type', '')
-        else:
-            snat_type = ''
+        snat_type = snat_data.get('type', '') if isinstance(snat_data, dict) else ''
 
         try:
             with transaction.atomic():
@@ -557,9 +595,7 @@ class F5Importer:
                 })
                 service.save(update_fields=['custom_field_data'])
 
-                # Lier le VIP au Service
                 self._link_vip_to_service(service, ip_str, name)
-
                 self.stats['virtual_servers'] += 1
 
         except Exception as e:
@@ -568,7 +604,9 @@ class F5Importer:
 
     def _cleanup_orphaned_objects(self):
         """
-        Supprime les objets NetBox qui ne sont plus présents dans la config F5.
+        Supprime les objets NetBox créés par ce plugin qui ne sont plus
+        présents dans la config F5.
+        Utilise des queries DB pour éviter de charger tous les objets en mémoire.
         """
         try:
             if self.kind == 'vm':
@@ -577,35 +615,35 @@ class F5Importer:
                 ct = ContentType.objects.get_for_model(Device)
 
             # ── Services (Virtual Servers) ──
-            all_services = Service.objects.filter(
+            orphaned_services = Service.objects.filter(
                 parent_object_type=ct,
                 parent_object_id=self.device.pk,
-            )
-            orphaned_services = [s for s in all_services if s.pk not in self._imported_service_ids]
-            deleted_vs = len(orphaned_services)
-            for s in orphaned_services:
-                s.delete()
+            ).exclude(pk__in=self._imported_service_ids)
+            deleted_vs = orphaned_services.count()
+            orphaned_services.delete()
 
             # ── IPAddress (VIP, Nodes, Self IPs) ──
-            # Supprimer les IPs avec description "[F5 *] ... (device_name)"
-            pattern = f'({self.device.name})'
-            all_f5_ips = IPAddress.objects.filter(description__icontains='[F5')
-            device_f5_ips = [ip for ip in all_f5_ips if pattern in (ip.description or '')]
-            orphaned_ips = [ip for ip in device_f5_ips if ip.pk not in self._imported_ip_ids]
-            deleted_ips = len(orphaned_ips)
-            for ip in orphaned_ips:
-                ip.delete()
+            # Double filtre DB : préfixe [F5 + nom du device entre parenthèses
+            device_tag = f'({self.device.name})'
+            orphaned_ips = IPAddress.objects.filter(
+                description__icontains='[F5',
+            ).filter(
+                description__icontains=device_tag,
+            ).exclude(
+                pk__in=self._imported_ip_ids,
+            )
+            deleted_ips = orphaned_ips.count()
+            orphaned_ips.delete()
 
-            # ── VLANs ──
-            # Ne pas supprimer automatiquement les VLANs (utilisés ailleurs)
-            # Mais on pourrait logger ceux qui ne sont plus présents
-            
+            # ── VLANs ── ne sont pas supprimés automatiquement
+            # (pourraient être utilisés par d'autres objets NetBox)
+
             if deleted_vs or deleted_ips:
                 self.stats['deleted'] = deleted_vs + deleted_ips
                 logger.info(f'[F5] Nettoyage : {deleted_vs} VS + {deleted_ips} IPs supprimés')
 
         except Exception as e:
-            logger.warning(f'Cleanup orphans : {e}')
+            logger.warning(f'[F5] Cleanup orphans : {e}')
 
     def _update_device(self):
         try:
@@ -619,4 +657,4 @@ class F5Importer:
             })
             self.device.save(update_fields=['custom_field_data'])
         except Exception as e:
-            logger.warning(f'Mise à jour device : {e}')
+            logger.warning(f'[F5] Mise à jour device : {e}')

@@ -8,7 +8,7 @@ class ServiceF5PoolPanel(PluginTemplateExtension):
     Ajoute un panneau "F5 — Pool & Membres" sur la page de détail d'un Service.
     N'apparaît que si le service provient d'un import F5 (custom field f5_pool_name renseigné).
     """
-    models = ['ipam.service', 'dcim.device', 'virtualization.virtualmachine']
+    models = ['ipam.service']
 
     def right_page(self):
         service = self.context['object']

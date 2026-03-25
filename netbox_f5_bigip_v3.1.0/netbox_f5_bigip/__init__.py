@@ -66,7 +66,7 @@ def _ensure_custom_fields():
         ('f5_node_count',   'F5 — Nb Nodes',           'integer', [ct_device, ct_vm]),
         ('f5_vlan_count',   'F5 — Nb VLANs',           'integer', [ct_device, ct_vm]),
         ('f5_selfip_count', 'F5 — Nb Self IPs',        'integer', [ct_device, ct_vm]),
-        ('f5_last_sync',    'F5 — Dernière synchro',   'text',    [ct_device, ct_vm]),
+        ('f5_last_sync',    'F5 — Dernière synchro',   'datetime', [ct_device, ct_vm]),
 
         # ── Sur Service (Virtual Servers importés) ───────────────────────
         ('f5_destination',  'F5 — Destination',   'text',     [ct_service]),

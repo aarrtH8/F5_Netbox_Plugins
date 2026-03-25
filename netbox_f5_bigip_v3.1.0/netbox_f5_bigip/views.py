@@ -11,6 +11,7 @@ from virtualization.models import VirtualMachine
 logger = logging.getLogger('netbox.plugins.netbox_f5_bigip')
 
 SESSION_KEY = 'f5_inventory_{device_id}'
+VALID_KINDS = frozenset({'device', 'vm'})
 
 
 def _get_object(kind, pk):
@@ -95,6 +96,9 @@ class ConnectView(View):
         return get_object_or_404(Device, pk=device_id)
 
     def get(self, request, kind, device_id):
+        if kind not in VALID_KINDS:
+            messages.error(request, f'Type invalide : {kind}.')
+            return redirect('plugins:netbox_f5_bigip:home')
         obj = self._get_device_obj(kind, device_id)
         ip  = _object_ip(obj)
         if not ip:
@@ -108,6 +112,9 @@ class ConnectView(View):
         })
 
     def post(self, request, kind, device_id):
+        if kind not in VALID_KINDS:
+            messages.error(request, f'Type invalide : {kind}.')
+            return redirect('plugins:netbox_f5_bigip:home')
         obj  = self._get_device_obj(kind, device_id)
         ip   = _object_ip(obj)
         if not ip:
