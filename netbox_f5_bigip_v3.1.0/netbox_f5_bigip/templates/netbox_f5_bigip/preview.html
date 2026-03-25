@@ -383,19 +383,63 @@ function pollJob(jobId, elapsed) {
                 spinner.style.display = 'none';
                 result.style.display = 'block';
                 const s = data.stats || {};
+                const errors = s.error_details || [];
+                const errCount = s.errors || 0;
+
+                // Bloc erreurs cliquable/expansible
+                let errBlock = '';
+                if (errCount > 0) {
+                    const errItems = errors.map(e => {
+                        // Détecter le type [VS], [VLAN], [Node], [Self IP]
+                        const typeMatch = e.match(/^\[([^\]]+)\]/);
+                        const typeLabel = typeMatch ? typeMatch[1] : 'Erreur';
+                        const badgeColor = {
+                            'VS': 'danger', 'VLAN': 'warning', 'Node': 'info', 'Self IP': 'secondary'
+                        }[typeLabel] || 'danger';
+                        const safeMsg = e.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                        return `<li class="list-group-item list-group-item-danger py-1 px-3 d-flex align-items-start gap-2" style="font-size:0.82rem;font-family:monospace;">
+                            <span class="badge bg-${badgeColor} mt-1 flex-shrink-0">${typeLabel}</span>
+                            <span>${safeMsg}</span>
+                            <button class="btn btn-link btn-sm p-0 ms-auto flex-shrink-0" title="Copier" onclick="navigator.clipboard.writeText(${JSON.stringify(e)})">
+                                <i class="mdi mdi-content-copy"></i>
+                            </button>
+                        </li>`;
+                    }).join('');
+
+                    errBlock = `
+                    <div class="mt-3">
+                        <details>
+                            <summary class="btn btn-sm btn-outline-danger d-inline-flex align-items-center gap-1" style="cursor:pointer;list-style:none;">
+                                <i class="mdi mdi-alert-circle"></i>
+                                <strong>${errCount} erreur(s)</strong> — cliquer pour voir le détail
+                            </summary>
+                            <ul class="list-group mt-2" style="max-height:300px;overflow-y:auto;border-radius:6px;">
+                                ${errItems || '<li class="list-group-item text-muted">Détails non disponibles</li>'}
+                            </ul>
+                            <button class="btn btn-sm btn-outline-secondary mt-2" onclick="copyAllErrors(${JSON.stringify(errors)})">
+                                <i class="mdi mdi-content-copy"></i> Copier toutes les erreurs
+                            </button>
+                        </details>
+                    </div>`;
+                }
+
                 const msg = `
-                    <div class="alert alert-success mb-0 py-3" style="background:white;color:#667eea;border:2px solid #667eea;border-radius:6px;">
-                        <h5 class="mb-2"><i class="mdi mdi-check-circle"></i> Import terminé en ${timeStr}</h5>
-                        <div class="mb-2">
-                            <strong>${s.virtual_servers||0}</strong> VS · 
-                            <strong>${s.pools||0}</strong> Pools · 
-                            <strong>${s.nodes||0}</strong> Nodes · 
-                            <strong>${s.vlans||0}</strong> VLANs · 
-                            <strong>${s.self_ips||0}</strong> Self IPs
-                            ${(s.deleted||0)>0 ? ` · <strong class="text-warning">${s.deleted} supprimés</strong>` : ''}
-                            ${(s.errors||0)>0 ? ` · <strong class="text-danger">${s.errors} erreur(s)</strong>` : ''}
+                    <div class="alert mb-0 py-3" style="background:white;color:#667eea;border:2px solid ${errCount>0?'#dc3545':'#667eea'};border-radius:6px;">
+                        <h5 class="mb-2">
+                            <i class="mdi mdi-${errCount>0?'alert-circle text-danger':'check-circle'}"></i>
+                            Import terminé en ${timeStr}
+                        </h5>
+                        <div class="mb-2 d-flex flex-wrap gap-2">
+                            <span class="badge bg-primary">${s.virtual_servers||0} VS</span>
+                            <span class="badge bg-secondary">${s.pools||0} Pools</span>
+                            <span class="badge bg-info text-dark">${s.nodes||0} Nodes</span>
+                            <span class="badge bg-success">${s.vlans||0} VLANs</span>
+                            <span class="badge bg-light text-dark border">${s.self_ips||0} Self IPs</span>
+                            ${(s.deleted||0)>0 ? `<span class="badge bg-warning text-dark">${s.deleted} supprimés</span>` : ''}
+                            ${errCount>0 ? `<span class="badge bg-danger">${errCount} erreur(s)</span>` : ''}
                         </div>
-                        <div class="mt-3">
+                        ${errBlock}
+                        <div class="mt-3 d-flex gap-2">
                             <a href="{% url 'plugins:netbox_f5_bigip:home' %}" class="btn btn-sm" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;">
                                 <i class="mdi mdi-home"></i> Accueil
                             </a>
@@ -411,11 +455,11 @@ function pollJob(jobId, elapsed) {
                         </div>
                     </div>`;
                 result.innerHTML = msg;
-                
+
                 // Notification browser
                 if ('Notification' in window && Notification.permission === 'granted') {
-                    new Notification('✅ Import F5 terminé', {
-                        body: `${s.virtual_servers||0} VS importés en ${timeStr}`,
+                    new Notification(errCount > 0 ? '⚠️ Import F5 terminé avec erreurs' : '✅ Import F5 terminé', {
+                        body: `${s.virtual_servers||0} VS importés en ${timeStr}${errCount>0?' — '+errCount+' erreur(s)':''}`,
                         icon: '/static/img/netbox_icon.png',
                         requireInteraction: true
                     });
@@ -431,6 +475,13 @@ function pollJob(jobId, elapsed) {
         }
     })
     .catch(() => setTimeout(() => pollJob(jobId, elapsed + 3), 3000));
+}
+
+function copyAllErrors(errors) {
+    const text = errors.join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+        alert(`${errors.length} erreur(s) copiée(s) dans le presse-papier.`);
+    });
 }
 </script>
 {% endblock %}

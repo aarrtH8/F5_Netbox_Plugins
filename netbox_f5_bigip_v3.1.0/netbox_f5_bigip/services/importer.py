@@ -15,6 +15,11 @@ logger = logging.getLogger('netbox.plugins.netbox_f5_bigip')
 
 PROTOCOL_MAP = {'tcp': 'tcp', 'udp': 'udp', 'sctp': 'sctp', 'any': 'tcp'}
 
+# Custom field "Squad" — appliqué automatiquement sur toutes les IPs et VLANs créés
+# Modifier CF_SQUAD_VALUE si la valeur stockée dans NetBox est différente
+CF_SQUAD_KEY   = 'squad'
+CF_SQUAD_VALUE = 'DC Network'
+
 
 class F5Importer:
 
@@ -49,6 +54,12 @@ class F5Importer:
 
         # VLANGroup partagé pour le site du device (créé au premier besoin)
         self._vlan_group: Optional[VLANGroup] = None
+
+        # Cache VRF : addr_str → VRF object (ou None)
+        self._vrf_cache: Dict[str, Any] = {}
+
+        # Détail des erreurs pour le reporting UI
+        self._errors: list = []
 
     # ── Utilitaires ─────────────────────────────────────────────────────── #
 
@@ -126,7 +137,9 @@ class F5Importer:
                            status: str = 'active') -> Optional[IPAddress]:
         """
         Crée ou récupère une IPAddress NetBox.
-        Hérite du tenant du device, applique le rôle et le statut fournis.
+        - VRF  : déduit du préfixe couvrant l'adresse
+        - Squad: CF 'DC Network' appliqué si absent
+        - Tenant, rôle et statut propagés depuis le device
         """
         if not address or address in ('any', '0.0.0.0'):
             return None
@@ -136,9 +149,12 @@ class F5Importer:
         if addr in self._ip_cache:
             return IPAddress.objects.filter(pk=self._ip_cache[addr]).first()
         try:
+            vrf = self._find_prefix_vrf(addr)
+
             defaults: Dict[str, Any] = {
                 'description': description,
                 'status':      status,
+                'vrf':         vrf,
             }
             if role:
                 defaults['role'] = role
@@ -149,9 +165,10 @@ class F5Importer:
                 address=addr,
                 defaults=defaults,
             )
+
+            updated_fields = []
             if not created:
                 # Mise à jour partielle des champs absents seulement
-                updated_fields = []
                 if description and not obj.description:
                     obj.description = description
                     updated_fields.append('description')
@@ -164,8 +181,16 @@ class F5Importer:
                 if tenant and not obj.tenant:
                     obj.tenant = tenant
                     updated_fields.append('tenant')
-                if updated_fields:
-                    obj.save(update_fields=updated_fields)
+                if vrf and not obj.vrf:
+                    obj.vrf = vrf
+                    updated_fields.append('vrf')
+
+            # Squad CF — ne pas écraser si déjà défini manuellement
+            if self._ensure_squad_cf(obj):
+                updated_fields.append('custom_field_data')
+
+            if updated_fields:
+                obj.save(update_fields=updated_fields)
 
             self._ip_cache[addr] = obj.pk
             self._imported_ip_ids.add(obj.pk)
@@ -178,6 +203,40 @@ class F5Importer:
         cf = dict(obj.custom_field_data) if isinstance(obj.custom_field_data, dict) else {}
         cf.update(updates)
         obj.custom_field_data = cf
+
+    def _ensure_squad_cf(self, obj) -> bool:
+        """
+        Applique le CF Squad='DC Network' si pas encore défini.
+        Retourne True si une mise à jour est nécessaire.
+        """
+        cf = dict(obj.custom_field_data) if isinstance(obj.custom_field_data, dict) else {}
+        if not cf.get(CF_SQUAD_KEY):
+            cf[CF_SQUAD_KEY] = CF_SQUAD_VALUE
+            obj.custom_field_data = cf
+            return True
+        return False
+
+    def _find_prefix_vrf(self, addr: str):
+        """
+        Retourne le VRF du préfixe le plus spécifique couvrant l'adresse donnée.
+        Résultat mis en cache pour éviter des requêtes répétées.
+        """
+        ip_only = addr.split('/')[0]
+        if ip_only in self._vrf_cache:
+            return self._vrf_cache[ip_only]
+        try:
+            prefix = (
+                Prefix.objects
+                .filter(prefix__net_contains=ip_only)
+                .order_by('-prefix__prefixlen')
+                .first()
+            )
+            vrf = prefix.vrf if prefix else None
+        except Exception as e:
+            logger.debug(f'[F5] VRF lookup {ip_only} : {e}')
+            vrf = None
+        self._vrf_cache[ip_only] = vrf
+        return vrf
 
     def _save_service(self, name: str, vip: str, port: int,
                       protocol: str, description: str) -> Optional[Service]:
@@ -361,6 +420,7 @@ class F5Importer:
         self._cleanup_orphaned_objects()
 
         self._update_device()
+        self.stats['error_details'] = self._errors
         logger.info(f'[F5] Import terminé : {self.stats}')
         return self.stats
 
@@ -381,7 +441,9 @@ class F5Importer:
                 ):
                     self.stats['nodes'] += 1
         except Exception as e:
-            logger.error(f'Node {name} : {e}')
+            msg = f'[Node] {name} : {e}'
+            logger.error(msg)
+            self._errors.append(msg)
             self.stats['errors'] += 1
 
     def _set_interface_mode(self, nb_iface, mode: str):
@@ -467,6 +529,10 @@ class F5Importer:
                     )
                     self._associate_vlan_to_prefix(vlan)
 
+                # Squad CF sur le VLAN (ne pas écraser si déjà défini)
+                if self._ensure_squad_cf(vlan):
+                    vlan.save(update_fields=['custom_field_data'])
+
                 self._vlan_cache[vid] = vlan
                 self._imported_vlan_ids.add(vlan.pk)
                 self.stats['vlans'] += 1
@@ -509,7 +575,9 @@ class F5Importer:
                                 logger.info(f'[F5] VLAN {vid} (untagged) → {nb_iface.name}')
 
         except Exception as e:
-            logger.error(f'VLAN {name} (VID {tag}) : {e}')
+            msg = f'[VLAN] {name} (VID {tag}) : {e}'
+            logger.error(msg)
+            self._errors.append(msg)
             self.stats['errors'] += 1
 
     def _import_self_ip(self, data: dict):
@@ -579,7 +647,9 @@ class F5Importer:
                 self.stats['self_ips'] += 1
 
         except Exception as e:
-            logger.error(f'Self IP {name} : {e}')
+            msg = f'[Self IP] {name} ({address}) : {e}'
+            logger.error(msg)
+            self._errors.append(msg)
             self.stats['errors'] += 1
 
     def _import_vs(self, data: dict, pools_by_name: dict):
@@ -647,7 +717,10 @@ class F5Importer:
                 self.stats['virtual_servers'] += 1
 
         except Exception as e:
-            logger.error(f'VS {name} : {e} | {traceback.format_exc().splitlines()[-2]}')
+            detail = traceback.format_exc().splitlines()[-1]
+            msg = f'[VS] {name} : {e} — {detail}'
+            logger.error(msg)
+            self._errors.append(msg)
             self.stats['errors'] += 1
 
     def _cleanup_orphaned_objects(self):
