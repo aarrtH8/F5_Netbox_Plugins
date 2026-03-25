@@ -613,13 +613,8 @@ class F5Importer:
                 if not ip_obj:
                     return
 
-                # Associer au VLAN
-                if vlan and ip_obj.vlan != vlan:
-                    ip_obj.vlan = vlan
-                    ip_obj.save(update_fields=['vlan'])
-                    logger.info(f'[F5] IP {address} associée au VLAN {vlan.name}')
-
                 # Associer à l'interface NetBox qui porte ce VLAN
+                # (NetBox 4.x : IPAddress n'a plus de champ 'vlan' direct)
                 # Utiliser les champs GFK explicites (assigned_object_type / id)
                 if vlan:
                     if self.kind == 'vm':
