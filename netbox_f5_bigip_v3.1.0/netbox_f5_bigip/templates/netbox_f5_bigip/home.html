@@ -159,7 +159,11 @@
                 {% endif %}
                 {% if d.last_sync %}
                 <button class="btn btn-sm btn-outline-danger"
-                        onclick="openPurgeModal('{{ d.kind }}', {{ d.id }}, '{{ d.name }}')"
+                        data-bs-toggle="modal"
+                        data-bs-target="#purgeModal"
+                        data-kind="{{ d.kind }}"
+                        data-device-id="{{ d.id }}"
+                        data-device-name="{{ d.name }}"
                         title="Purger tous les objets F5 de cet équipement">
                     <i class="mdi mdi-delete-sweep"></i>
                 </button>
@@ -225,17 +229,21 @@
 <script>
 let _purgeKind = '', _purgeDeviceId = 0;
 
-function openPurgeModal(kind, deviceId, deviceName) {
-    _purgeKind     = kind;
-    _purgeDeviceId = deviceId;
-    document.getElementById('purgeDeviceName').textContent  = deviceName;
-    document.getElementById('purgeDeviceName2').textContent = deviceName;
-    document.getElementById('purgeVlansCheck').checked = false;
-    document.getElementById('purgeResult').style.display = 'none';
-    document.getElementById('purgeConfirmBtn').disabled = false;
-    document.getElementById('purgeConfirmBtn').innerHTML = '<i class="mdi mdi-delete-sweep"></i> Confirmer la purge';
-    new bootstrap.Modal(document.getElementById('purgeModal')).show();
-}
+document.addEventListener('DOMContentLoaded', function () {
+    var modalEl = document.getElementById('purgeModal');
+    modalEl.addEventListener('show.bs.modal', function (event) {
+        var btn = event.relatedTarget;
+        _purgeKind     = btn.getAttribute('data-kind');
+        _purgeDeviceId = btn.getAttribute('data-device-id');
+        var name       = btn.getAttribute('data-device-name');
+        document.getElementById('purgeDeviceName').textContent  = name;
+        document.getElementById('purgeDeviceName2').textContent = name;
+        document.getElementById('purgeVlansCheck').checked = false;
+        document.getElementById('purgeResult').style.display = 'none';
+        document.getElementById('purgeConfirmBtn').disabled = false;
+        document.getElementById('purgeConfirmBtn').innerHTML = '<i class="mdi mdi-delete-sweep"></i> Confirmer la purge';
+    });
+});
 
 function executePurge() {
     const btn    = document.getElementById('purgeConfirmBtn');
