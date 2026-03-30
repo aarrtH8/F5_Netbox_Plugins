@@ -1,12 +1,16 @@
-"""Vues F5 BIG-IP — Home / Connect / Preview / Import."""
+"""Vues F5 BIG-IP — Home / Connect / Preview / Import / Purge."""
 import logging
+import re
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views.generic import View
 from django.http import JsonResponse
 from django.contrib import messages
+from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
 from django.db.models import Q
 from dcim.models import Device
 from virtualization.models import VirtualMachine
+from ipam.models import Service, IPAddress, VLAN, VLANGroup
 
 logger = logging.getLogger('netbox.plugins.netbox_f5_bigip')
 
@@ -354,3 +358,94 @@ class JobStatusView(View):
         except Exception as e:
             logger.error(f'JobStatus {job_id} : {e}')
             return JsonResponse({'status': 'error', 'error': str(e)})
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  6. Purge — supprime tous les objets F5 créés pour ce device                #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+class PurgeView(View):
+    """
+    Purge complète des objets NetBox créés par le plugin F5 pour un device donné.
+
+    Supprime :
+      - Services (Virtual Servers importés)
+      - IPAddresses taggées [F5 *] liées au device
+      - (optionnel) VLANs du VLANGroup F5 + le groupe lui-même
+
+    Remet à zéro les custom fields de comptage sur le device.
+    """
+
+    def _get_obj(self, kind, device_id):
+        if kind == 'vm':
+            return get_object_or_404(VirtualMachine, pk=device_id)
+        return get_object_or_404(Device, pk=device_id)
+
+    def post(self, request, kind, device_id):
+        if kind not in VALID_KINDS:
+            return JsonResponse({'success': False, 'error': 'Type invalide.'})
+
+        obj         = self._get_obj(kind, device_id)
+        purge_vlans = request.POST.get('purge_vlans') == '1'
+        deleted     = {'services': 0, 'ips': 0, 'vlans': 0, 'vlan_group': False}
+
+        try:
+            with transaction.atomic():
+
+                # ── 1. Services ──────────────────────────────────────────────
+                if kind == 'vm':
+                    ct = ContentType.objects.get_for_model(VirtualMachine)
+                else:
+                    ct = ContentType.objects.get_for_model(Device)
+
+                svc_qs = Service.objects.filter(
+                    parent_object_type=ct,
+                    parent_object_id=device_id,
+                )
+                deleted['services'] = svc_qs.count()
+                svc_qs.delete()
+                logger.info(f'[F5 Purge] {obj.name} : {deleted["services"]} service(s) supprimé(s)')
+
+                # ── 2. IPAddresses [F5 *] liées à ce device ─────────────────
+                device_tag = f'({obj.name})'
+                ip_qs = IPAddress.objects.filter(
+                    description__icontains='[F5',
+                ).filter(
+                    description__icontains=device_tag,
+                )
+                deleted['ips'] = ip_qs.count()
+                ip_qs.delete()
+                logger.info(f'[F5 Purge] {obj.name} : {deleted["ips"]} IP(s) supprimée(s)')
+
+                # ── 3. VLANs + VLANGroup (optionnel) ────────────────────────
+                if purge_vlans:
+                    match = re.search(r'(DC\d+)([A-Z]+)LDB', obj.name.upper())
+                    if match:
+                        group_slug = f'f5-{match.group(1).lower()}-{match.group(2).lower()}'
+                        group = VLANGroup.objects.filter(slug=group_slug).first()
+                        if group:
+                            vlan_qs = VLAN.objects.filter(group=group)
+                            deleted['vlans'] = vlan_qs.count()
+                            vlan_qs.delete()
+                            group.delete()
+                            deleted['vlan_group'] = True
+                            logger.info(
+                                f'[F5 Purge] {obj.name} : {deleted["vlans"]} VLAN(s) '
+                                f'+ groupe "{group.name}" supprimés'
+                            )
+                    else:
+                        logger.warning(f'[F5 Purge] Impossible de parser le nom {obj.name!r} pour les VLANs')
+
+                # ── 4. Reset custom fields de comptage ───────────────────────
+                cf = dict(obj.custom_field_data) if isinstance(obj.custom_field_data, dict) else {}
+                for key in ('f5_vs_count', 'f5_pool_count', 'f5_node_count',
+                            'f5_vlan_count', 'f5_selfip_count', 'f5_last_sync'):
+                    cf.pop(key, None)
+                obj.custom_field_data = cf
+                obj.save(update_fields=['custom_field_data'])
+
+        except Exception as e:
+            logger.error(f'[F5 Purge] {obj.name} : {e}')
+            return JsonResponse({'success': False, 'error': str(e)})
+
+        return JsonResponse({'success': True, 'deleted': deleted, 'device': obj.name})
