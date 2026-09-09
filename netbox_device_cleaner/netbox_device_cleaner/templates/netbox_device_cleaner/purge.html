@@ -7,27 +7,14 @@
 <style>
 .cleaner-hero {
     background: linear-gradient(135deg, #c94b4b 0%, #4b134f 100%);
-    color: white;
-    padding: 2rem;
-    border-radius: 8px;
-    margin-bottom: 2rem;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    color: white; padding: 2rem; border-radius: 8px;
+    margin-bottom: 2rem; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
-.cleaner-card {
-    border: none;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-}
-.cleaner-table-header {
-    background: linear-gradient(135deg, #f5f7fa 0%, #dfe3ea 100%);
-    font-weight: 600;
-}
-.row-selected {
-    background-color: #fff3cd !important;
-}
+.cleaner-card { border: none; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.cleaner-table-header { background: linear-gradient(135deg, #f5f7fa 0%, #dfe3ea 100%); font-weight: 600; }
 #resultTable td { vertical-align: middle; }
-.badge-vm   { background: #764ba2; color: white; }
-.badge-dev  { background: #c94b4b; color: white; }
+.badge-vm  { background: #764ba2; color: white; padding: .3rem .6rem; border-radius: .25rem; }
+.badge-dev { background: #c94b4b; color: white; padding: .3rem .6rem; border-radius: .25rem; }
 </style>
 {% endblock %}
 
@@ -52,29 +39,21 @@
                placeholder="Filtrer par nom…" oninput="filterTable()">
     </div>
     <div class="card-body p-0">
-        <table class="table table-hover mb-0" id="deviceTable">
+        <table class="table table-hover mb-0">
             <thead class="table-light">
                 <tr>
                     <th class="ps-3" style="width:40px;">
-                        <input type="checkbox" id="selectAll" title="Tout sélectionner" onchange="toggleAll(this)">
+                        <input type="checkbox" id="selectAll" onchange="toggleAll(this)">
                     </th>
-                    <th>Équipement</th>
-                    <th>Type</th>
-                    <th>Site</th>
-                    <th>Rôle</th>
-                    <th>Tenant</th>
+                    <th>Équipement</th><th>Type</th><th>Site</th><th>Rôle</th><th>Tenant</th>
                 </tr>
             </thead>
             <tbody>
             {% for d in devices %}
             <tr class="device-row" data-name="{{ d.name|lower }}">
-                <td class="ps-3">
-                    <input type="checkbox" class="item-check" value="device_{{ d.pk }}">
-                </td>
+                <td class="ps-3"><input type="checkbox" class="item-check" value="device_{{ d.pk }}"></td>
                 <td><strong>{{ d.name }}</strong></td>
-                <td><span class="badge badge-dev">Physique</span>
-                    {% if d.device_type %}<br><small class="text-muted">{{ d.device_type }}</small>{% endif %}
-                </td>
+                <td><span class="badge-dev">Physique</span>{% if d.device_type %}<br><small class="text-muted">{{ d.device_type }}</small>{% endif %}</td>
                 <td>{% if d.site %}{{ d.site }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
                 <td>{% if d.role %}{{ d.role }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
                 <td>{% if d.tenant %}{{ d.tenant }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
@@ -82,13 +61,9 @@
             {% endfor %}
             {% for vm in vms %}
             <tr class="device-row" data-name="{{ vm.name|lower }}">
-                <td class="ps-3">
-                    <input type="checkbox" class="item-check" value="vm_{{ vm.pk }}">
-                </td>
+                <td class="ps-3"><input type="checkbox" class="item-check" value="vm_{{ vm.pk }}"></td>
                 <td><strong>{{ vm.name }}</strong></td>
-                <td><span class="badge badge-vm">VM</span>
-                    {% if vm.platform %}<br><small class="text-muted">{{ vm.platform }}</small>{% endif %}
-                </td>
+                <td><span class="badge-vm">VM</span>{% if vm.platform %}<br><small class="text-muted">{{ vm.platform }}</small>{% endif %}</td>
                 <td>{% if vm.site %}{{ vm.site }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
                 <td>{% if vm.role %}{{ vm.role }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
                 <td>{% if vm.tenant %}{{ vm.tenant }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
@@ -99,7 +74,6 @@
     </div>
 </div>
 
-<!-- Options + bouton de purge -->
 <div class="cleaner-card card mb-4">
     <div class="card-body">
         <div class="row align-items-center">
@@ -115,7 +89,8 @@
                 </div>
             </div>
             <div class="col-auto ms-auto">
-                <button class="btn btn-danger" id="purgeBtn" onclick="confirmPurge()" disabled>
+                <button class="btn btn-danger" id="purgeBtn"
+                        data-bs-toggle="modal" data-bs-target="#confirmModal" disabled>
                     <i class="mdi mdi-broom"></i> Purger la sélection
                 </button>
             </div>
@@ -130,13 +105,12 @@
     </div>
 </div>
 
-<!-- Résultats -->
 <div id="resultsSection" style="display:none;">
     <div class="cleaner-card card">
         <div class="card-header cleaner-table-header">
             <strong><i class="mdi mdi-check-circle"></i> Résultats de la purge</strong>
         </div>
-        <table class="table mb-0" id="resultTable">
+        <table class="table mb-0">
             <thead class="table-light">
                 <tr>
                     <th>Équipement</th>
@@ -152,7 +126,6 @@
     </div>
 </div>
 
-<!-- Modale de confirmation -->
 <div class="modal fade" id="confirmModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -184,8 +157,8 @@
 <script>
 function filterTable() {
     const q = document.getElementById('searchInput').value.toLowerCase();
-    document.querySelectorAll('.device-row').forEach(row => {
-        row.style.display = row.dataset.name.includes(q) ? '' : 'none';
+    document.querySelectorAll('.device-row').forEach(r => {
+        r.style.display = r.dataset.name.includes(q) ? '' : 'none';
     });
 }
 
@@ -197,8 +170,16 @@ function toggleAll(cb) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    document.querySelectorAll('.item-check').forEach(cb => {
-        cb.addEventListener('change', updateCount);
+    document.querySelectorAll('.item-check').forEach(cb => cb.addEventListener('change', updateCount));
+
+    document.getElementById('confirmModal').addEventListener('show.bs.modal', function () {
+        const n   = document.querySelectorAll('.item-check:checked').length;
+        const del = document.getElementById('deleteInterfaces').checked;
+        document.getElementById('confirmText').textContent =
+            `Vous allez purger ${n} équipement(s). Services, IPs et VLANs exclusifs seront supprimés.`;
+        document.getElementById('confirmInterfacesWarning').style.display = del ? '' : 'none';
+        document.getElementById('confirmOkBtn').disabled = false;
+        document.getElementById('confirmOkBtn').innerHTML = '<i class="mdi mdi-broom"></i> Confirmer';
     });
 });
 
@@ -206,15 +187,6 @@ function updateCount() {
     const n = document.querySelectorAll('.item-check:checked').length;
     document.getElementById('selectedCount').textContent = `${n} équipement(s) sélectionné(s)`;
     document.getElementById('purgeBtn').disabled = n === 0;
-}
-
-function confirmPurge() {
-    const n   = document.querySelectorAll('.item-check:checked').length;
-    const del = document.getElementById('deleteInterfaces').checked;
-    document.getElementById('confirmText').textContent =
-        `Vous allez purger ${n} équipement(s). Services, IPs et VLANs exclusifs seront supprimés.`;
-    document.getElementById('confirmInterfacesWarning').style.display = del ? '' : 'none';
-    new bootstrap.Modal(document.getElementById('confirmModal')).show();
 }
 
 function executePurge() {
@@ -232,7 +204,7 @@ function executePurge() {
     fetch('', {method: 'POST', body})
     .then(r => r.json())
     .then(data => {
-        bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+        document.querySelector('#confirmModal [data-bs-dismiss="modal"]').click();
 
         if (!data.success) {
             alert('Erreur : ' + data.error);
@@ -245,25 +217,22 @@ function executePurge() {
         tbody.innerHTML = '';
         data.results.forEach(r => {
             const badge = r.kind === 'vm'
-                ? '<span class="badge badge-vm">VM</span>'
-                : '<span class="badge badge-dev">Physique</span>';
-            tbody.innerHTML += `
-                <tr>
-                    <td>${badge} <strong>${r.name}</strong></td>
-                    <td class="text-center">${r.services}</td>
-                    <td class="text-center">${r.ips}</td>
-                    <td class="text-center">${r.vlans}</td>
-                    <td class="text-center text-muted">${r.vlans_skipped}</td>
-                    <td class="text-center">${r.interfaces}</td>
-                </tr>`;
+                ? '<span class="badge-vm">VM</span>'
+                : '<span class="badge-dev">Physique</span>';
+            tbody.innerHTML += `<tr>
+                <td>${badge} <strong>${r.name}</strong></td>
+                <td class="text-center">${r.services}</td>
+                <td class="text-center">${r.ips}</td>
+                <td class="text-center">${r.vlans}</td>
+                <td class="text-center text-muted">${r.vlans_skipped}</td>
+                <td class="text-center">${r.interfaces}</td>
+            </tr>`;
         });
-
         if (data.errors && data.errors.length) {
             data.errors.forEach(e => {
                 tbody.innerHTML += `<tr class="table-danger"><td colspan="6"><i class="mdi mdi-alert-circle"></i> ${e}</td></tr>`;
             });
         }
-
         document.getElementById('resultsSection').style.display = '';
         document.getElementById('resultsSection').scrollIntoView({behavior: 'smooth'});
         document.querySelectorAll('.item-check:checked').forEach(c => c.checked = false);

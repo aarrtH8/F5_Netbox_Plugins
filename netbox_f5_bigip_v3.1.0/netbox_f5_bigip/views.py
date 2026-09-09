@@ -10,7 +10,7 @@ from django.db import transaction
 from django.db.models import Q
 from dcim.models import Device
 from virtualization.models import VirtualMachine
-from ipam.models import Service, IPAddress, VLAN, VLANGroup
+from ipam.models import Service, IPAddress, VLAN, VLANGroup, Prefix
 
 logger = logging.getLogger('netbox.plugins.netbox_f5_bigip')
 
@@ -48,7 +48,6 @@ class HomeView(View):
     def get(self, request):
         entries = []
 
-        # ── Devices physiques avec rôle balancer ──
         for d in Device.objects.filter(
             role__name__icontains='balancer'
         ).select_related('device_type', 'primary_ip4', 'primary_ip6', 'role').order_by('name'):
@@ -66,7 +65,6 @@ class HomeView(View):
                 'last_sync':   (cf.get('f5_last_sync') or '')[:16].replace('T', ' ') or None,
             })
 
-        # ── Machines virtuelles avec rôle balancer ──
         for vm in VirtualMachine.objects.filter(
             role__name__icontains='balancer'
         ).select_related('platform', 'primary_ip4', 'primary_ip6', 'role').order_by('name'):
@@ -135,11 +133,9 @@ class ConnectView(View):
             from netbox_f5_bigip.services.f5_client import F5Client
             client    = F5Client(host=ip, username=f5_user, password=f5_password)
             inventory = client.fetch_full_inventory()
-
             key = SESSION_KEY.format(device_id=f'{kind}_{device_id}')
             request.session[key] = {'inventory': inventory, 'host': ip}
             return redirect('plugins:netbox_f5_bigip:preview', kind=kind, device_id=device_id)
-
         except Exception as e:
             logger.error(f'Connexion F5 {ip} : {e}')
             messages.error(request, f'Connexion échouée : {e}')
@@ -172,21 +168,10 @@ class PreviewView(View):
             if not isinstance(vs, dict):
                 continue
             dest = vs.get('destination', '')
-            
-            # Sécuriser profiles
             profiles = vs.get('profiles', [])
-            if isinstance(profiles, list):
-                profiles_str = ', '.join([str(p) for p in profiles if p])
-            else:
-                profiles_str = ''
-            
-            # Sécuriser rules
+            profiles_str = ', '.join([str(p) for p in profiles if p]) if isinstance(profiles, list) else ''
             rules = vs.get('rules', [])
-            if isinstance(rules, list):
-                rules_str = ', '.join([str(r) for r in rules if r])
-            else:
-                rules_str = ''
-            
+            rules_str = ', '.join([str(r) for r in rules if r]) if isinstance(rules, list) else ''
             vs_list.append({
                 'name':      vs.get('name', ''),
                 'partition': vs.get('partition', 'Common'),
@@ -203,8 +188,6 @@ class PreviewView(View):
             if not isinstance(p, dict):
                 continue
             members = p.get('members_list', [])
-            
-            # Sécuriser members pour l'affichage
             members_display = []
             if isinstance(members, list):
                 for m in members:
@@ -213,7 +196,6 @@ class PreviewView(View):
                         port = m.get('port', '')
                         if addr:
                             members_display.append(f"{addr}:{port}")
-            
             pool_list.append({
                 'name':      p.get('name', ''),
                 'partition': p.get('partition', 'Common'),
@@ -295,7 +277,6 @@ class ImportView(View):
                 kind=kind,
                 inventory=data['inventory'],
             )
-            # Conserver la session jusqu'à la fin du job
             return JsonResponse({'success': True, 'job_id': rq_job.id})
         except Exception as e:
             logger.error(f'Import {kind}/{device_id} : {e}')
@@ -313,17 +294,12 @@ class JobStatusView(View):
         try:
             import django_rq
             from rq.job import Job
-
             queue  = django_rq.get_queue('default')
             rq_job = Job.fetch(job_id, connection=queue.connection)
-
-            # get_status() retourne un enum dans RQ >= 1.16 → forcer en string
             status_raw = rq_job.get_status()
             status = status_raw.value if hasattr(status_raw, 'value') else str(status_raw)
 
             if status == 'finished':
-                # RQ < 1.16 : job.result est le dict retourné directement
-                # RQ >= 1.16 : job.result est un objet Result → .return_value
                 raw = rq_job.result
                 logger.debug(f'[F5 Job] result type={type(raw).__name__} value={repr(raw)[:200]}')
                 if hasattr(raw, 'return_value'):
@@ -333,25 +309,20 @@ class JobStatusView(View):
                 elif isinstance(raw, dict):
                     stats = raw
                 else:
-                    # Dernier recours : latest_result().return_value (RQ 1.16+)
                     try:
                         stats = rq_job.latest_result().return_value or {}
                     except Exception:
                         stats = {}
 
-                # S'assurer que stats contient bien les clés attendues
                 expected = ['virtual_servers', 'pools', 'nodes', 'vlans', 'self_ips', 'errors']
                 if not any(k in stats for k in expected):
-                    # Peut-être que stats est wrappé dans un niveau supplémentaire
                     stats = {}
-
                 return JsonResponse({'status': 'finished', 'stats': stats})
 
             elif status == 'failed':
                 exc = str(rq_job.exc_info or '')
                 last_line = [l for l in exc.splitlines() if l.strip()][-1] if exc else 'Erreur inconnue'
                 return JsonResponse({'status': 'failed', 'error': last_line})
-
             else:
                 return JsonResponse({'status': status})
 
@@ -365,16 +336,6 @@ class JobStatusView(View):
 # ─────────────────────────────────────────────────────────────────────────── #
 
 class PurgeView(View):
-    """
-    Purge complète des objets NetBox créés par le plugin F5 pour un device donné.
-
-    Supprime :
-      - Services (Virtual Servers importés)
-      - IPAddresses taggées [F5 *] liées au device
-      - (optionnel) VLANs du VLANGroup F5 + le groupe lui-même
-
-    Remet à zéro les custom fields de comptage sur le device.
-    """
 
     def _get_obj(self, kind, device_id):
         if kind == 'vm':
@@ -392,32 +353,23 @@ class PurgeView(View):
         try:
             with transaction.atomic():
 
-                # ── 1. Services ──────────────────────────────────────────────
-                if kind == 'vm':
-                    ct = ContentType.objects.get_for_model(VirtualMachine)
-                else:
-                    ct = ContentType.objects.get_for_model(Device)
-
-                svc_qs = Service.objects.filter(
-                    parent_object_type=ct,
-                    parent_object_id=device_id,
-                )
+                # ── 1. Services ──────────────────────────────────────────
+                ct = ContentType.objects.get_for_model(VirtualMachine if kind == 'vm' else Device)
+                svc_qs = Service.objects.filter(parent_object_type=ct, parent_object_id=device_id)
                 deleted['services'] = svc_qs.count()
                 svc_qs.delete()
                 logger.info(f'[F5 Purge] {obj.name} : {deleted["services"]} service(s) supprimé(s)')
 
-                # ── 2. IPAddresses [F5 *] liées à ce device ─────────────────
+                # ── 2. IPAddresses [F5 *] liées à ce device ───────────────
                 device_tag = f'({obj.name})'
                 ip_qs = IPAddress.objects.filter(
                     description__icontains='[F5',
-                ).filter(
-                    description__icontains=device_tag,
-                )
+                ).filter(description__icontains=device_tag)
                 deleted['ips'] = ip_qs.count()
                 ip_qs.delete()
                 logger.info(f'[F5 Purge] {obj.name} : {deleted["ips"]} IP(s) supprimée(s)')
 
-                # ── 3. VLANs + VLANGroup (optionnel) ────────────────────────
+                # ── 3. VLANs + VLANGroup (optionnel) ────────────────────
                 if purge_vlans:
                     match = re.search(r'(DC\d+)([A-Z]+)LDB', obj.name.upper())
                     if match:
@@ -426,6 +378,8 @@ class PurgeView(View):
                         if group:
                             vlan_qs = VLAN.objects.filter(group=group)
                             deleted['vlans'] = vlan_qs.count()
+                            # Détacher les Prefixes (FK PROTECT) avant suppression
+                            Prefix.objects.filter(vlan__in=vlan_qs).update(vlan=None)
                             vlan_qs.delete()
                             group.delete()
                             deleted['vlan_group'] = True
@@ -436,7 +390,7 @@ class PurgeView(View):
                     else:
                         logger.warning(f'[F5 Purge] Impossible de parser le nom {obj.name!r} pour les VLANs')
 
-                # ── 4. Reset custom fields de comptage ───────────────────────
+                # ── 4. Reset custom fields de comptage ───────────────────
                 cf = dict(obj.custom_field_data) if isinstance(obj.custom_field_data, dict) else {}
                 for key in ('f5_vs_count', 'f5_pool_count', 'f5_node_count',
                             'f5_vlan_count', 'f5_selfip_count', 'f5_last_sync'):
